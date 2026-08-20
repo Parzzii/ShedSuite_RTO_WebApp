@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ShedSuite → RTO Pro V6</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="landing">
+  <main class="shell narrow">
+    <header class="topbrand">
+      <div>
+        <div class="eyebrow">LOCAL RTO IMPORT TOOL</div>
+        <h1>ShedSuite → RTO Pro <span style="font-size:.55em;opacity:.7">V6</span></h1>
+        <p class="lede">Upload the ShedSuite contracts report, pull the PDFs, map the contracts, review customer/inventory/tax details, and export the final RTO Pro package.</p>
+      </div>
+    </header>
+
+    {% with messages=get_flashed_messages(with_categories=true) %}
+      {% for cat,msg in messages %}<div class="flash {{cat}}">{{msg}}</div>{% endfor %}
+    {% endwith %}
+
+    <form class="panel upload-panel tabbed-landing" method="post" action="{{ url_for('process') }}" enctype="multipart/form-data">
+      <nav class="landing-tabs" aria-label="Import setup">
+        <button type="button" class="landing-tab active" data-tab="import">Import</button>
+        <button type="button" class="landing-tab" data-tab="firebird">Firebird settings</button>
+      </nav>
+
+      <div class="landing-tab-panel active" data-panel="import">
+        <section>
+          <div class="section-number">1</div>
+          <div class="section-body">
+            <h2>ShedSuite contracts report</h2>
+            <p class="muted">Use the same <strong>RTO contracts report CSV</strong> you used with the Excel workbook.</p>
+            <label class="file-drop">
+              <span>Choose CSV</span>
+              <input type="file" name="csv_file" accept=".csv,text/csv" required>
+            </label>
+            <div class="two-col compact-top">
+              <label>PDF collection
+                <select name="pdf_mode">
+                  <option value="contract">Invoice + signed contract</option>
+                  <option value="all">Invoice + contract + available attachments</option>
+                </select>
+              </label>
+              <label class="checkbox-card"><input type="checkbox" name="download_pdfs" value="yes" checked><span><strong>Download PDFs now</strong><small>V3 direct downloads stay fast; Delivery Certificate is added through Chromium only.</small></span></label>
+            </div>
+            <div class="info-line"><strong>ZipTax:</strong> automatic tax-zone detection runs from the delivery address during import. You can re-run it and override the selected RTO tax zone later on each contract.</div>
+          </div>
+        </section>
+      </div>
+
+      <div class="landing-tab-panel" data-panel="firebird">
+        <section>
+          <div class="section-number">2</div>
+          <div class="section-body">
+            <h2>RTO Pro / Firebird lookup</h2>
+            <p class="muted">These settings normally stay the same, so they live on their own tab. Your original workbook expects a Windows ODBC DSN named <code>Firebird DSN</code>.</p>
+            <div class="three-col">
+              <label>ODBC DSN<input name="dsn" value="{{dsn}}" autocomplete="off"></label>
+              <label>DB user <span class="optional">optional</span><input name="db_user" autocomplete="off"></label>
+              <label>DB password <span class="optional">optional</span><input name="db_password" type="password" autocomplete="new-password"></label>
+            </div>
+            <div class="info-line">Dealer IDs, Store IDs, Agents, Zones, Tax Zones, existing serials, names and contracts are read from Firebird when this connection succeeds.</div>
+          </div>
+        </section>
+      </div>
+
+      <div class="form-actions">
+        <button class="primary big" type="submit">Build review screen</button>
+      </div>
+    </form>
+
+    <div class="privacy-note"><strong>Local only.</strong> The app listens on <code>127.0.0.1</code>. The DB password is used for this request and is not saved in the job folder.</div>
+  </main>
+
+  <script>
+    document.querySelectorAll('.landing-tab').forEach(btn => btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      document.querySelectorAll('.landing-tab').forEach(x => x.classList.toggle('active', x === btn));
+      document.querySelectorAll('.landing-tab-panel').forEach(x => x.classList.toggle('active', x.dataset.panel === tab));
+    }));
+  </script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Review contracts · ShedSuite → RTO Pro</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="stickybar">
+    <div class="sticky-inner">
+      <div>
+        <a class="backlink" href="{{ url_for('index') }}">← New import</a>
+        <strong>{{rows|length}} contracts</strong>
+        <span class="db-pill {{'good' if refs.connected else 'bad'}}">Firebird {{'connected' if refs.connected else 'not connected'}}</span>
+      </div>
+      <div class="sticky-actions">
+        <button type="button" class="secondary" id="validateBtn">Validate rows</button>
+        <button type="button" class="primary" id="saveTopBtn">Save all edits</button>
+        <a class="button ghost" href="{{ url_for('download', job=job, kind='csv') }}">RTOProImport.csv</a>
+        <a class="button dark" href="{{ url_for('download', job=job, kind='zip') }}">Full ZIP</a>
+      </div>
+    </div>
+  </div>
+
+  <main class="shell wide">
+    <header class="review-head">
+      <div>
+        <div class="eyebrow">REVIEW BEFORE RTO PRO</div>
+        <h1>Review each contract</h1>
+        <p class="lede small">Each contract now has focused tabs for Mapping, Inventory, Customer, Tax &amp; Address, and PDF / Agent. Changes still write to the same RTO Pro import row.</p>
+      </div>
+      <div class="review-stats">
+        <div><strong id="readyCount">0</strong><span>Ready</span></div>
+        <div><strong id="needsCount">0</strong><span>Needs review</span></div>
+      </div>
+    </header>
+
+    {% with messages=get_flashed_messages(with_categories=true) %}
+      {% for cat,msg in messages %}<div class="flash {{cat}}">{{msg}}</div>{% endfor %}
+    {% endwith %}
+
+    {% if refs.error %}<div class="connection-warning"><strong>Firebird lookup:</strong> {{refs.error}}<br><span>You can still edit manually, but Dealer/Zone/Tax dropdowns need the DSN connection for the complete RTO Pro lists.</span></div>{% endif %}
+
+    <section class="control-panel">
+      <label class="searchbox">Search contracts<input id="searchInput" placeholder="name, order, serial, dealer…"></label>
+      <label>Bulk store <select id="bulkStore"></select></label>
+      <button type="button" class="secondary" id="applyBulkStore">Apply store to visible rows</button>
+      <label class="toggle"><input id="onlyNeeds" type="checkbox"><span>Show only rows needing review</span></label>
+      <a class="button ghost push-right" href="{{ url_for('download', job=job, kind='review') }}">Review report CSV</a>
+    </section>
+
+    <div id="validationBanner" class="validation-banner hidden"></div>
+    <div id="cards" class="contract-list"></div>
+
+    <form id="saveForm" method="post" action="{{ url_for('save', job=job) }}">
+      <input type="hidden" name="rows_payload" id="rowsPayload">
+    </form>
+  </main>
+
+  <dialog id="allFieldsDialog" class="field-dialog">
+    <form method="dialog" class="dialog-frame">
+      <header><div><div class="eyebrow">FULL RTO RECORD</div><h2 id="dialogTitle">Edit all RTO fields</h2></div><button class="icon-btn" value="cancel" aria-label="Close">×</button></header>
+      <p class="muted">These are the exact RTO import columns. Changes here update the same row shown in the contract tabs.</p>
+      <div id="allFieldsGrid" class="all-fields-grid"></div>
+      <footer><button value="cancel" class="secondary">Cancel</button><button type="button" id="applyAllFields" class="primary">Apply fields</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="sourceDialog" class="field-dialog source-dialog">
+    <form method="dialog" class="dialog-frame">
+      <header><div><div class="eyebrow">ORIGINAL SHEDSUITE ROW</div><h2 id="sourceTitle">Source details</h2></div><button class="icon-btn" value="cancel">×</button></header>
+      <div id="sourceGrid" class="source-grid"></div>
+      <footer><button class="secondary">Close</button></footer>
+    </form>
+  </dialog>
+
+  <script id="appRows" type="application/json">{{ rows|tojson }}</script>
+  <script id="appRefs" type="application/json">{{ refs|tojson }}</script>
+  <script id="appHeaders" type="application/json">{{ headers|tojson }}</script>
+  <script id="appSources" type="application/json">{{ sources|tojson }}</script>
+  <script>window.RTO_JOB = {{ job|tojson }};</script>
+  <script src="{{ url_for('static', filename='review.js') }}"></script>
+</body>
+</html>
