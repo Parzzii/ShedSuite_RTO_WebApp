@@ -1,1 +1,8 @@
 work/
+
+.venv/
+.env
+.pyc
+_pycache__/
+.DS_Store
+Thumb.db
