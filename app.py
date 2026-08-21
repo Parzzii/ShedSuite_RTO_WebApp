@@ -91,7 +91,7 @@ DEFAULT_MODEL_SERIES = {
 }
 
 # Used-building contract rules. RTO Pro does not allow a contract number to be
-# reused, while a used building must keep its original MODEL1.  V6.3 therefore
+# reused, while a used building must keep its original MODEL1.  V6.3.1 therefore
 # keeps MODEL1 untouched and assigns CONTRACT = MODEL1 + suffix.
 USED_CONTRACT_SUFFIXES = ['U'] + [chr(c) for c in range(ord('A'), ord('Z') + 1) if chr(c) != 'U']
 
@@ -177,6 +177,7 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
         row['_used_detection_reason'] = ' · '.join(reasons)
         row['_used_base_contract'] = model
         row['_used_contract_suffix'] = ''
+        row['_used_suffix_manual'] = False
         row['_used_contract_error'] = ''
 
         if detected:
@@ -993,7 +994,7 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
 
 
 def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> list[str]:
-    """Recheck V6.3 used suffixes immediately before launching RTO Pro.
+    """Recheck V6.3.1 used suffixes immediately before launching RTO Pro.
 
     If Firebird is reachable, this uses the newest contract list. Otherwise it
     falls back to the contract list captured when the job was created/refreshed.
@@ -1048,6 +1049,7 @@ def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> l
             changes.append(f"{row.get('NAME', 'Contract')}: {current or '(blank)'} → {candidate}")
         row['CONTRACT'] = candidate
         row['_used_contract_suffix'] = new_suffix
+        row['_used_suffix_manual'] = False
         row['_used_contract_error'] = ''
         unavailable.add(_contract_key(candidate))
 
@@ -1463,7 +1465,7 @@ def write_import_csv(rows: list[dict], path: Path):
 
 
 def validate_rto_runtime(rows: list[dict]) -> list[str]:
-    """Catch the RTO Pro field limits and V6.3 used-building rules."""
+    """Catch the RTO Pro field limits and V6.3.1 used-building rules."""
     errors = []
     seen_contracts: set[str] = set()
     for i, r in enumerate(rows, 1):
@@ -1592,6 +1594,7 @@ def write_review_csv(rows: list[dict], path: Path):
         '_used_building',
         '_used_detected',
         '_used_contract_suffix',
+        '_used_suffix_manual',
         '_used_detection_reason',
         '_used_contract_error',
         '_set_contract',
@@ -1776,7 +1779,7 @@ def process():
     # Keep DOB as the exact calendar date written in the ShedSuite CSV.
     fix_dobs_from_source(rows, source_rows)
 
-    # V6.3 used-building workflow. This is deliberately post-transform so the
+    # V6.3.1 used-building workflow. This is deliberately post-transform so the
     # original V3 mapping/model logic stays authoritative.
     apply_used_building_defaults(rows, source_rows, ref)
 
@@ -2053,6 +2056,7 @@ def save(job):
             '_used_detection_reason',
             '_used_base_contract',
             '_used_contract_suffix',
+            '_used_suffix_manual',
             '_used_contract_error',
         ]:
             if k in new:
@@ -2446,7 +2450,7 @@ def run_rto(job):
     jp, rows, refs, _ = load_job(job)
 
     # Recheck used-building suffixes against the newest RTO data just before
-    # import. If U was taken meanwhile, V6.3 advances to A/B/C... automatically.
+    # import. If U was taken meanwhile, V6.3.1 advances to A/B/C... automatically.
     suffix_changes = ensure_used_contracts_available(jp, rows, refs)
     if suffix_changes:
         save_job_rows(jp, rows)

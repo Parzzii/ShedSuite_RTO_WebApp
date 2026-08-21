@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V6.3
+ShedSuite RTO Web App V6.3.1
 ========================
 
 Base: V3.0.0
@@ -29,7 +29,7 @@ Important:
 - RTO_EXE defaults to C:\RTOwin\RTO-win.exe.
 
 
-V6.3 - Used Buildings
+V6.3.1 - Used Buildings
 ---------------------
 - Adds a Used building checkbox to every contract card.
 - When checked, MODEL1 stays unchanged and CONTRACT is automatically suffixed.
@@ -39,3 +39,11 @@ V6.3 - Used Buildings
   or when the ShedSuite Condition explicitly indicates used/pre-owned/repo.
 - Shows a USED BUILDING / USED DETECTED tag in the review card.
 - Keeps the normal V3/V6 mapping behavior untouched for non-used buildings.
+
+
+V6.3.1 - Editable Used-Building Suffix
+---------------------------------------
+- Used buildings still auto-select the first available suffix (U, then A/B/C...).
+- The suffix can now be changed manually from a dropdown on the Contract # field.
+- Suffixes already used by RTO Pro or another row in the same import are disabled.
+- A manually selected suffix is preserved when possible; the pre-import safety check only changes it if it conflicts.

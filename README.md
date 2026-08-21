@@ -1,6 +1,6 @@
-# ShedSuite → RTO Pro Web App V6.3
+# ShedSuite → RTO Pro Web App V6.3.1
 
-V6.3 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+V6.3.1 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
 
 ## V3 review workflow
 
@@ -90,6 +90,14 @@ The first run creates `.venv` and installs the packages automatically.
 - `RTO_Import_Package.zip`
 
 
-## V6.3 used buildings
+## V6.3.1 used buildings
 
 The Mapping tab now includes a **Used building** checkbox. When enabled, the building keeps its existing `MODEL1`, while `CONTRACT` receives a unique suffix (`U` first, then `A`, `B`, `C`, etc.) so RTO Pro does not reuse a prior contract number. The app auto-detects likely used buildings from prior RTO Pro contract history and explicit ShedSuite conditions such as Used / Pre-owned / Repo, and displays a visible Used Building tag.
+
+
+V6.3.1 - Editable Used-Building Suffix
+---------------------------------------
+- Used buildings still auto-select the first available suffix (U, then A/B/C...).
+- The suffix can now be changed manually from a dropdown on the Contract # field.
+- Suffixes already used by RTO Pro or another row in the same import are disabled.
+- A manually selected suffix is preserved when possible; the pre-import safety check only changes it if it conflicts.
