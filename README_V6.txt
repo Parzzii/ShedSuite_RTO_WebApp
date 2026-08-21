@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V6.3.1
+ShedSuite RTO Web App V6.3.2
 ========================
 
 Base: V3.0.0
@@ -47,3 +47,13 @@ V6.3.1 - Editable Used-Building Suffix
 - The suffix can now be changed manually from a dropdown on the Contract # field.
 - Suffixes already used by RTO Pro or another row in the same import are disabled.
 - A manually selected suffix is preserved when possible; the pre-import safety check only changes it if it conflicts.
+
+
+V6.3.2 - Manually Typed Used-Building Suffix
+------------------------------------------------
+- Replaces the fixed suffix dropdown with a free-text suffix box.
+- Auto-detection still suggests U first, then A/B/C... when a building is marked used.
+- You can type a different suffix manually; letters and numbers are accepted and normalized to uppercase.
+- MODEL1 remains unchanged; CONTRACT is always MODEL1 + the typed suffix.
+- The final contract must fit RTO Pro's 10-character CONTRACT limit and must not already exist.
+- A manual suffix is preserved through RTO Pro import when it is still available.

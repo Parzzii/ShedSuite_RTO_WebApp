@@ -28,6 +28,7 @@
   const agents = Array.isArray(refs.agents) ? refs.agents : [];
   const existingContracts = new Set((Array.isArray(refs.existing_contracts) ? refs.existing_contracts : []).map(x => clean(x).toUpperCase()).filter(Boolean));
   const usedSuffixes = ['U', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(x => x !== 'U')];
+  const usedSuffixPattern = /^[A-Z0-9]+$/;
 
   function key(obj, ...names) {
     for (const n of names) if (obj && obj[n] !== undefined) return obj[n];
@@ -131,7 +132,8 @@
     const model=clean(r.MODEL1);
     suffix=clean(suffix).toUpperCase();
     if (!model) return {contract:'',suffix,error:'Used building needs a model number.',taken:false};
-    if (!usedSuffixes.includes(suffix)) return {contract:'',suffix,error:'Choose a valid used-building suffix.',taken:false};
+    if (!suffix) return {contract:model,suffix,error:'Type a suffix for this used building.',taken:false};
+    if (!usedSuffixPattern.test(suffix)) return {contract:`${model}${suffix}`,suffix,error:'Suffix can only contain letters and numbers.',taken:false};
     const candidate=`${model}${suffix}`;
     if (candidate.length > 10) return {contract:candidate,suffix,error:'That suffix would exceed RTO Pro’s 10-character contract limit.',taken:false};
     const key=candidate.toUpperCase();
@@ -139,7 +141,7 @@
     if (!taken) {
       taken=rows.some((other,j)=>j!==i && clean(other.CONTRACT).toUpperCase()===key);
     }
-    return {contract:candidate,suffix,error:taken?'That contract number is already in use. Choose another suffix.':'',taken};
+    return {contract:candidate,suffix,error:taken?'That contract number is already in use. Type another suffix.':'',taken};
   }
 
   function usedContractCandidate(i) {
@@ -150,12 +152,10 @@
     return {contract:'',suffix:'',error:'No available suffix fits RTO Pro’s 10-character contract limit.'};
   }
 
-  function usedSuffixOptions(i, current='') {
-    current=clean(current).toUpperCase();
+  function usedSuffixSuggestions(i) {
     return usedSuffixes.map(suffix=>{
       const state=usedSuffixState(i,suffix);
-      const note=state.error ? (state.taken?' · already used':' · unavailable') : '';
-      return `<option value="${esc(suffix)}" ${suffix===current?'selected':''} ${state.error?'disabled':''}>${esc(suffix+note)}</option>`;
+      return state.error ? '' : `<option value="${esc(suffix)}"></option>`;
     }).join('');
   }
 
@@ -163,18 +163,16 @@
     const r=rows[i];
     const state=usedSuffixState(i,suffix);
     r._used_suffix_manual=true;
+    r._used_contract_suffix=state.suffix;
     r._used_contract_error=state.error;
-    if (!state.error && state.contract) {
-      r.CONTRACT=state.contract;
-      r._used_contract_suffix=state.suffix;
-      r._used_base_contract=clean(r.MODEL1);
-    }
+    r._used_base_contract=clean(r.MODEL1);
+    if (state.contract) r.CONTRACT=state.contract;
   }
 
   function applyUsedBuilding(i, enabled, manual=true) {
     const r=rows[i];
     const preferredSuffix=clean(r._used_contract_suffix).toUpperCase();
-    const preserveManual=boolish(r._used_suffix_manual) && usedSuffixes.includes(preferredSuffix);
+    const preserveManual=boolish(r._used_suffix_manual) && !!preferredSuffix;
     r._used_building=!!enabled;
     if (manual) r._used_manual_override=true;
     r._used_base_contract=clean(r.MODEL1);
@@ -182,11 +180,10 @@
     if (enabled) {
       if (preserveManual) {
         const preferred=usedSuffixState(i,preferredSuffix);
-        if (!preferred.error && preferred.contract) {
-          r.CONTRACT=preferred.contract;
-          r._used_contract_suffix=preferred.suffix;
-          return;
-        }
+        r._used_contract_suffix=preferred.suffix;
+        r._used_contract_error=preferred.error;
+        if (preferred.contract) r.CONTRACT=preferred.contract;
+        return;
       }
       const choice=usedContractCandidate(i);
       if (choice.contract) {
@@ -218,7 +215,7 @@
     if (boolish(r._used_building)) {
       const model=clean(r.MODEL1).toUpperCase(), contract=clean(r.CONTRACT).toUpperCase();
       const suffix=(model && contract.startsWith(model)) ? contract.slice(model.length) : '';
-      if (clean(r._used_contract_error) || !contract || contract===model || !contract.startsWith(model) || !usedSuffixes.includes(suffix) || contract.length>10) p.push('Used contract suffix');
+      if (clean(r._used_contract_error) || !contract || contract===model || !contract.startsWith(model) || !suffix || !usedSuffixPattern.test(suffix) || contract.length>10) p.push('Used contract suffix');
     }
     return [...new Set(p)];
   }
@@ -271,7 +268,7 @@
       </div>
       <div class="mapping-grid model-grid">
         <div class="field suggestion-field"><span>Model #</span><input data-i="${i}" data-field="MODEL1" value="${esc(r.MODEL1)}"><div class="suggestions">${inventorySuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(inventorySuggestion)}">Inventory ${esc(inventorySuggestion)}</button>`:''}${stockSuggestion?`<button type="button" class="chip suggestion stock" data-i="${i}" data-field="MODEL1" data-value="${esc(stockSuggestion)}">Stock ${esc(stockSuggestion)}</button>`:''}${!used && nextSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(nextSuggestion)}">Next ${esc(nextSuggestion)}</button>`:''}</div>${used?'<small class="used-model-note">Used: keep the original building model number.</small>':''}</div>
-        <div class="field suggestion-field"><span>Contract #</span><input data-i="${i}" data-field="CONTRACT" value="${esc(r.CONTRACT)}" ${used?'readonly aria-readonly="true"':''}><div class="suggestions">${!used?`<button type="button" class="chip copy-model" data-i="${i}">Copy Model #</button>`:''}${!used && contractSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="CONTRACT" data-value="${esc(contractSuggestion)}">Order ${esc(contractSuggestion)}</button>`:''}${used?`<label class="used-suffix-picker"><span>Suffix</span><select class="used-suffix-select" data-i="${i}">${usedSuffixOptions(i,r._used_contract_suffix)}</select>${boolish(r._used_suffix_manual)?'<small>Manual</small>':'<small>Auto</small>'}</label>`:''}</div></div>
+        <div class="field suggestion-field"><span>Contract #</span><input data-i="${i}" data-field="CONTRACT" value="${esc(r.CONTRACT)}" ${used?'readonly aria-readonly="true"':''}><div class="suggestions">${!used?`<button type="button" class="chip copy-model" data-i="${i}">Copy Model #</button>`:''}${!used && contractSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="CONTRACT" data-value="${esc(contractSuggestion)}">Order ${esc(contractSuggestion)}</button>`:''}${used?`<label class="used-suffix-picker"><span>Suffix</span><input class="used-suffix-input" data-i="${i}" value="${esc(r._used_contract_suffix)}" list="used-suffix-list-${i}" autocomplete="off" spellcheck="false" placeholder="Type suffix"><datalist id="used-suffix-list-${i}">${usedSuffixSuggestions(i)}</datalist>${boolish(r._used_suffix_manual)?'<small>Manual</small>':'<small>Auto suggested · type anything</small>'}</label>`:''}</div></div>
         <label class="field"><span>Zone</span><select class="zone-select" data-i="${i}">${zoneOptions(r)}</select><small>${esc(r._zone_selector || '')}</small></label>
         <div class="field readout-field"><span>Tax Zone</span><strong>${esc(r.TAXZONE || 'Needs selection')}</strong><small>Change it in Tax & Address</small></div>
       </div>
@@ -551,9 +548,20 @@
     document.querySelectorAll('.used-building-toggle').forEach(el=>el.addEventListener('change',e=>{
       const i=+e.target.dataset.i; applyUsedBuilding(i,e.target.checked,true); render();
     }));
-    document.querySelectorAll('.used-suffix-select').forEach(el=>el.addEventListener('change',e=>{
-      const i=+e.target.dataset.i; setUsedSuffix(i,e.target.value); render();
-    }));
+    document.querySelectorAll('.used-suffix-input').forEach(el=>{
+      el.addEventListener('input',e=>{
+        const i=+e.target.dataset.i;
+        const value=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+        if (e.target.value!==value) e.target.value=value;
+        setUsedSuffix(i,value);
+        const contractInput=document.querySelector(`input[data-i="${i}"][data-field="CONTRACT"]`);
+        if (contractInput && rows[i].CONTRACT) contractInput.value=rows[i].CONTRACT;
+        updateStats();
+      });
+      el.addEventListener('change',e=>{
+        const i=+e.target.dataset.i; setUsedSuffix(i,e.target.value); render();
+      });
+    });
     document.querySelectorAll('input[data-helper]').forEach(el=>el.addEventListener('input',e=>{
       const i=+e.target.dataset.i; rows[i][e.target.dataset.helper]=e.target.value;
       if (e.target.dataset.helper==='_secondary_phone') applyPhoneRule(i,false);

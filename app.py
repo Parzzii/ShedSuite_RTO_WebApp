@@ -91,7 +91,7 @@ DEFAULT_MODEL_SERIES = {
 }
 
 # Used-building contract rules. RTO Pro does not allow a contract number to be
-# reused, while a used building must keep its original MODEL1.  V6.3.1 therefore
+# reused, while a used building must keep its original MODEL1.  V6.3.2 therefore
 # keeps MODEL1 untouched and assigns CONTRACT = MODEL1 + suffix.
 USED_CONTRACT_SUFFIXES = ['U'] + [chr(c) for c in range(ord('A'), ord('Z') + 1) if chr(c) != 'U']
 
@@ -994,7 +994,7 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
 
 
 def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> list[str]:
-    """Recheck V6.3.1 used suffixes immediately before launching RTO Pro.
+    """Recheck V6.3.2 used suffixes immediately before launching RTO Pro.
 
     If Firebird is reachable, this uses the newest contract list. Otherwise it
     falls back to the contract list captured when the job was created/refreshed.
@@ -1030,7 +1030,8 @@ def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> l
         current_valid = (
             bool(current)
             and current_key not in unavailable
-            and suffix in USED_CONTRACT_SUFFIXES
+            and bool(suffix)
+            and bool(re.fullmatch(r'[A-Z0-9]+', suffix))
             and len(current) <= 10
         )
 
@@ -1498,8 +1499,8 @@ def validate_rto_runtime(rows: list[dict]) -> list[str]:
                 errors.append(f'{name}: used building CONTRACT must be MODEL1 plus a suffix.')
             else:
                 suffix = _contract_key(contract)[len(_contract_key(model)):]
-                if suffix not in USED_CONTRACT_SUFFIXES:
-                    errors.append(f'{name}: used building suffix {suffix or "(blank)"} is not valid.')
+                if not suffix or not re.fullmatch(r'[A-Z0-9]+', suffix):
+                    errors.append(f'{name}: used building suffix {suffix or "(blank)"} must contain only letters and numbers.')
             if str(r.get('_used_contract_error') or '').strip():
                 errors.append(f'{name}: {r.get("_used_contract_error")}')
     return list(dict.fromkeys(errors))

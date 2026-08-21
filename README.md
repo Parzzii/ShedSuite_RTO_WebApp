@@ -101,3 +101,8 @@ V6.3.1 - Editable Used-Building Suffix
 - The suffix can now be changed manually from a dropdown on the Contract # field.
 - Suffixes already used by RTO Pro or another row in the same import are disabled.
 - A manually selected suffix is preserved when possible; the pre-import safety check only changes it if it conflicts.
+
+
+## V6.3.2 manually typed used-building suffix
+
+The Used Building suffix control is now a free-text field. The app still auto-suggests `U`, then `A`, `B`, `C`, etc., but you can type your own alphanumeric suffix manually. The model number remains unchanged, and the resulting contract must be unique and no more than 10 characters total.
