@@ -597,13 +597,41 @@ def category_for(src: dict[str, str], categories: dict[str, str]) -> str:
     return key[:30].strip().lower()
 
 
+# Canonical RTO Pro Brand/Vendor names.  ShedSuite company names can include
+# legal/entity wording (LLC, Buildings LLC, etc.) or small naming variations.
+# BRAND1 and VENDOR1 should always use the short canonical value below.
+BRAND_ALIASES = (
+    ('ALPINE', ('alpine',)),
+    ('4 SEASONS', ('4seasons', 'fourseasons', '4season', 'fourseason')),
+    ('GENESIS', ('genesis',)),
+    ('SMART SHED', ('smartshed', 'smartsheds')),
+    ('WESTWOOD SHEDS', ('westwood',)),
+    ('LONESTAR SHEDS', ('lonestar', 'lonestarsheds')),
+    ('TRUE BUILT', ('truebuilt',)),
+    ('YODER STORAGE', ('yoderstorage', 'yoder')),
+    ('PHOENIX', ('phoenix',)),
+)
+
+
 def normalized_brand(company: Any) -> str:
     c = clean_text(company)
-    lo = c.casefold()
-    if 'alpine' in lo:
-        return 'ALPINE'
-    if 'phoenix' in lo:
-        return 'PHOENIX'
+    if not c:
+        return ''
+
+    # Compacting makes punctuation, spaces and legal suffixes irrelevant:
+    #   "Genesis Buildings, LLC" -> "genesisbuildingsllc"
+    #   "Lone Star Sheds LLC"    -> "lonestarshedsllc"
+    compact = re.sub(r'[^a-z0-9]+', '', c.casefold())
+
+    # Common word-number spelling for 4 Seasons.
+    compact = compact.replace('four', '4')
+
+    for canonical, aliases in BRAND_ALIASES:
+        if any(alias in compact for alias in aliases):
+            return canonical
+
+    # Preserve the old behavior for an unknown manufacturer rather than
+    # blanking or guessing it.
     return c.upper()
 
 

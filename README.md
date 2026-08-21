@@ -1,6 +1,6 @@
-# ShedSuite → RTO Pro Web App V6.3.1
+# ShedSuite → RTO Pro Web App V6.3.3
 
-V6.3.1 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+V6.3.3 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
 
 ## V3 review workflow
 
@@ -106,3 +106,13 @@ V6.3.1 - Editable Used-Building Suffix
 ## V6.3.2 manually typed used-building suffix
 
 The Used Building suffix control is now a free-text field. The app still auto-suggests `U`, then `A`, `B`, `C`, etc., but you can type your own alphanumeric suffix manually. The model number remains unchanged, and the resulting contract must be unique and no more than 10 characters total.
+
+
+## V6.3.3 brand/vendor normalization
+
+ShedSuite company-name variations are normalized for RTO Pro BRAND1 and VENDOR1.
+The canonical values are ALPINE, 4 SEASONS, GENESIS, SMART SHED, WESTWOOD SHEDS,
+LONESTAR SHEDS, TRUE BUILT, YODER STORAGE, and PHOENIX. Legal suffixes and common
+variations such as LLC, Buildings LLC, spacing, punctuation, Lone Star, Smart Sheds,
+and Four Seasons are accepted automatically. Unknown brands keep their original
+upper-cased value.

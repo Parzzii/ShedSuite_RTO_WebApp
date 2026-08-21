@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V6.3.2
+ShedSuite RTO Web App V6.3.3
 ========================
 
 Base: V3.0.0
@@ -57,3 +57,12 @@ V6.3.2 - Manually Typed Used-Building Suffix
 - MODEL1 remains unchanged; CONTRACT is always MODEL1 + the typed suffix.
 - The final contract must fit RTO Pro's 10-character CONTRACT limit and must not already exist.
 - A manual suffix is preserved through RTO Pro import when it is still available.
+
+
+V6.3.3 - Brand/Vendor Normalization
+-----------------------------------
+BRAND1 and VENDOR1 now normalize ShedSuite manufacturer/company-name variants to
+these exact RTO Pro values: ALPINE, 4 SEASONS, GENESIS, SMART SHED, WESTWOOD SHEDS,
+LONESTAR SHEDS, TRUE BUILT, YODER STORAGE, and PHOENIX. LLC/Buildings/punctuation/
+spacing and common variants such as Lone Star, Smart Sheds, and Four Seasons are
+recognized automatically.
