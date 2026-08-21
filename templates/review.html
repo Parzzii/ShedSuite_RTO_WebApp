@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
   <title>Review contracts · ShedSuite → RTO Pro</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -81,5 +82,6 @@
   <script id="appSources" type="application/json">{{ sources|tojson }}</script>
   <script>window.RTO_JOB = {{ job|tojson }};</script>
   <script src="{{ url_for('static', filename='review.js') }}"></script>
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
 </body>
 </html>

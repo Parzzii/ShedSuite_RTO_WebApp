@@ -1,6 +1,6 @@
-# ShedSuite → RTO Pro Web App V6.3.3
+# ShedSuite → RTO Pro Web App V6.3.4
 
-V6.3.3 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+V6.3.4 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
 
 ## V3 review workflow
 
@@ -108,7 +108,7 @@ V6.3.1 - Editable Used-Building Suffix
 The Used Building suffix control is now a free-text field. The app still auto-suggests `U`, then `A`, `B`, `C`, etc., but you can type your own alphanumeric suffix manually. The model number remains unchanged, and the resulting contract must be unique and no more than 10 characters total.
 
 
-## V6.3.3 brand/vendor normalization
+## V6.3.4 brand/vendor normalization
 
 ShedSuite company-name variations are normalized for RTO Pro BRAND1 and VENDOR1.
 The canonical values are ALPINE, 4 SEASONS, GENESIS, SMART SHED, WESTWOOD SHEDS,
@@ -116,3 +116,12 @@ LONESTAR SHEDS, TRUE BUILT, YODER STORAGE, and PHOENIX. Legal suffixes and commo
 variations such as LLC, Buildings LLC, spacing, punctuation, Lone Star, Smart Sheds,
 and Four Seasons are accepted automatically. Unknown brands keep their original
 upper-cased value.
+
+
+## V6.3.4 themes
+
+- Added a persistent normal Dark Mode with a visible Light/Dark toggle.
+- Added a hidden Cyberpunk easter-egg theme. It is intentionally absent from the normal theme control.
+- Secret activation: press `Alt + Shift + K` anywhere, or click the V6.3.4 version label five times quickly on the landing page.
+- The selected theme is stored only in the browser (`localStorage`) and follows you across app pages.
+- Clicking the normal theme button while Cyberpunk is active returns to normal Dark Mode.

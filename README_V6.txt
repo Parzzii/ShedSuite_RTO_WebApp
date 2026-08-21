@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V6.3.3
+ShedSuite RTO Web App V6.3.4
 ========================
 
 Base: V3.0.0
@@ -59,10 +59,17 @@ V6.3.2 - Manually Typed Used-Building Suffix
 - A manual suffix is preserved through RTO Pro import when it is still available.
 
 
-V6.3.3 - Brand/Vendor Normalization
+V6.3.4 - Brand/Vendor Normalization
 -----------------------------------
 BRAND1 and VENDOR1 now normalize ShedSuite manufacturer/company-name variants to
 these exact RTO Pro values: ALPINE, 4 SEASONS, GENESIS, SMART SHED, WESTWOOD SHEDS,
 LONESTAR SHEDS, TRUE BUILT, YODER STORAGE, and PHOENIX. LLC/Buildings/punctuation/
 spacing and common variants such as Lone Star, Smart Sheds, and Four Seasons are
 recognized automatically.
+
+
+V6.3.4 - Themes
+----------------
+- Visible persistent Light/Dark mode toggle.
+- Hidden Cyberpunk theme easter egg.
+- Secret: Alt+Shift+K, or click the version label five times quickly on the first page.
