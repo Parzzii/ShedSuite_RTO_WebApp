@@ -1113,9 +1113,7 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
             )
         )
     )
-
-    status_bg = '#dcfce7' if connected else '#fee2e2'
-    status_fg = '#166534' if connected else '#991b1b'
+    status_class = 'good' if connected else 'bad'
 
     pdf_rows = []
     available_count = 0
@@ -1140,100 +1138,70 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
             pages = html_lib.escape(str(r.get('_pdf_pages', '') or ''))
 
             buttons = (
-                f'<a href="{open_url}" target="_blank" '
-                'style="padding:6px 9px;background:#2563eb;color:white;'
-                'border-radius:6px;text-decoration:none">Open PDF</a> '
-                f'<a href="{download_url}" '
-                'style="padding:6px 9px;background:#475569;color:white;'
-                'border-radius:6px;text-decoration:none">Download</a>'
+                f'<a class="workflow-mini-button pdf-open" href="{open_url}" '
+                'target="_blank" rel="noopener">Open PDF</a>'
+                f'<a class="workflow-mini-button pdf-download" href="{download_url}">Download</a>'
             )
-
             detail = (pages + ' pages · ' if pages else '') + manifest_text
         else:
-            buttons = (
-                '<span style="color:#b91c1c;font-weight:700">'
-                'No combined PDF</span>'
-            )
+            buttons = '<span class="combined-pdf-missing">No combined PDF</span>'
             detail = 'Re-process the CSV with Download PDFs enabled.'
 
         pdf_rows.append(
-            '<div style="display:grid;'
-            'grid-template-columns:minmax(180px,1fr) '
-            'minmax(180px,.6fr) minmax(260px,2fr);'
-            'gap:10px;align-items:center;padding:9px 0;'
-            'border-bottom:1px solid #e5e7eb">'
-            f'<div><b>{name}</b>'
-            f'<div style="font-size:11px;color:#64748b">'
-            f'Order {order_id}</div></div>'
-            f'<div>{buttons}</div>'
-            f'<div style="font-size:11px;color:#475569">'
-            f'{detail}</div>'
+            '<div class="combined-pdf-row">'
+            f'<div class="combined-pdf-name"><b>{name}</b>'
+            f'<span>Order {order_id}</span></div>'
+            f'<div class="combined-pdf-actions">{buttons}</div>'
+            f'<div class="combined-pdf-detail">{detail}</div>'
             '</div>'
         )
 
     return f"""
-<section style="max-width:1500px;margin:16px auto;padding:0 16px;
-                font-family:Arial,sans-serif">
-  <div style="background:white;border:1px solid #cbd5e1;
-              border-radius:12px;box-shadow:0 2px 8px rgba(15,23,42,.08);
-              overflow:hidden">
-    <div style="background:#0f172a;color:white;padding:13px 15px;
-                display:flex;justify-content:space-between;gap:10px;
-                align-items:center">
+<section id="rto-workflow-panel" class="injected-workflow-panel">
+  <div class="workflow-card">
+    <div class="workflow-head">
       <div>
-        <div style="font-size:16px;font-weight:800">RTO Pro Workflow</div>
-        <div style="font-size:11px;color:#cbd5e1">
+        <div class="workflow-title">RTO Pro Workflow</div>
+        <div class="workflow-subtitle">
           Same sequence as Excel: CSV → RTO Pro → refresh DB → PDF imaging
         </div>
       </div>
-      <span style="background:{status_bg};color:{status_fg};font-size:11px;
-                   font-weight:800;padding:5px 9px;border-radius:999px">
+      <span class="workflow-db-status {status_class}">
         {html_lib.escape(status_text)}
       </span>
     </div>
 
-    <div style="padding:14px;display:flex;gap:9px;flex-wrap:wrap;
-                align-items:center">
+    <div class="workflow-actions">
       <form method="post"
             action="{url_for('run_rto', job=job)}"
-            onsubmit="return confirm('Launch RTO Pro and import this CSV?')"
-            style="margin:0">
-        <button type="submit"
-                style="padding:9px 13px;background:#16a34a;color:white;
-                       border:0;border-radius:7px;font-weight:800;cursor:pointer">
+            onsubmit="return confirm('Launch RTO Pro and import this CSV?')">
+        <button class="workflow-button workflow-import" type="submit">
           1. Import to RTO Pro
         </button>
       </form>
 
       <form method="post"
-            action="{url_for('refresh_rto', job=job)}"
-            style="margin:0">
-        <button type="submit"
-                style="padding:9px 13px;background:#2563eb;color:white;
-                       border:0;border-radius:7px;font-weight:800;cursor:pointer">
+            action="{url_for('refresh_rto', job=job)}">
+        <button class="workflow-button workflow-refresh" type="submit">
           2. Refresh RTO Data
         </button>
       </form>
 
       <form method="post"
             action="{url_for('import_pdfs_to_rto', job=job)}"
-            onsubmit="return confirm('Only click this AFTER RTO Pro confirms the customer import. Continue?')"
-            style="margin:0">
-        <button type="submit"
-                style="padding:9px 13px;background:#7c3aed;color:white;
-                       border:0;border-radius:7px;font-weight:800;cursor:pointer">
+            onsubmit="return confirm('Only click this AFTER RTO Pro confirms the customer import. Continue?')">
+        <button class="workflow-button workflow-imaging" type="submit">
           3. Import PDFs to RTO Imaging
         </button>
       </form>
 
-      <a href="{url_for('download', job=job, kind='csv')}"
-         style="padding:9px 13px;background:#475569;color:white;
-                border-radius:7px;text-decoration:none;font-weight:700">
+      <a class="workflow-button workflow-download"
+         href="{url_for('download', job=job, kind='csv')}">
         Download RTO CSV
       </a>
     </div>
 
-    <div style="padding:0 14px 13px;color:#475569;font-size:12px">
+    <div class="workflow-help">
       After RTO Pro shows its successful import confirmation, click
       <b>Refresh RTO Data</b>. That reads the updated Firebird tables,
       fills assigned account numbers, and refreshes last-used model numbers.
@@ -1242,23 +1210,18 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
   </div>
 </section>
 
-<section style="max-width:1500px;margin:16px auto;padding:0 16px;
-                font-family:Arial,sans-serif">
-  <details open
-           style="background:white;border:1px solid #cbd5e1;
-                  border-radius:12px;box-shadow:0 2px 8px rgba(15,23,42,.08);
-                  overflow:hidden">
-    <summary style="cursor:pointer;background:#f8fafc;padding:12px 14px;
-                    font-weight:800">
-      Combined PDFs — {available_count}/{len(rows)} ready
+<section id="combined-pdfs-panel" class="injected-workflow-panel">
+  <details class="combined-pdfs-card" open>
+    <summary class="combined-pdfs-summary">
+      <span>Combined PDFs</span>
+      <strong>{available_count}/{len(rows)} ready</strong>
     </summary>
-    <div style="padding:4px 14px 12px">
+    <div class="combined-pdfs-list">
       {''.join(pdf_rows)}
     </div>
   </details>
 </section>
 """
-
 
 def inject_review_panels(
     page_html: str,
