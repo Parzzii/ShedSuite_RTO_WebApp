@@ -1,6 +1,6 @@
-# ShedSuite → RTO Pro Web App V3
+# ShedSuite → RTO Pro Web App V6.3
 
-V3 is the next rebuild of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+V6.3 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
 
 ## V3 review workflow
 
@@ -88,3 +88,8 @@ The first run creates `.venv` and installs the packages automatically.
 - `Combined_Files\`
 - `XML_Files\`
 - `RTO_Import_Package.zip`
+
+
+## V6.3 used buildings
+
+The Mapping tab now includes a **Used building** checkbox. When enabled, the building keeps its existing `MODEL1`, while `CONTRACT` receives a unique suffix (`U` first, then `A`, `B`, `C`, etc.) so RTO Pro does not reuse a prior contract number. The app auto-detects likely used buildings from prior RTO Pro contract history and explicit ShedSuite conditions such as Used / Pre-owned / Repo, and displays a visible Used Building tag.

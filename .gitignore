@@ -1,8 +1,17 @@
+# Local Python environment
+.venv/
+venv/
+
+# Runtime jobs / downloaded PDFs
 work/
 
-.venv/
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local secrets
 .env
-.pyc
-_pycache__/
+
+# OS/editor files
 .DS_Store
-Thumb.db
+Thumbs.db

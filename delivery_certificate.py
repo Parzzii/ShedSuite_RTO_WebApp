@@ -350,9 +350,9 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
     logins, legacy_book, _selected = _legacy_logins(base)
     if not logins:
         return [
-            'Delivery Certificate: V6 could not find Contract_Import.xlsm / Logininfo. '
-            'Put the old Contract_Import.xlsm beside V6 or set LEGACY_XLSM_PATH. '
-            'V6 intentionally never asks for a ShedSuite password.'
+            'Delivery Certificate: V6.3 could not find Contract_Import.xlsm / Logininfo. '
+            'Put the old Contract_Import.xlsm beside V6.3 or set LEGACY_XLSM_PATH. '
+            'V6.3 intentionally never asks for a ShedSuite password.'
         ]
 
     src_by_order = {str(x.get('Customer Order Id', '')).strip(): x for x in source_rows}
@@ -371,7 +371,7 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
                     continue
                 src = src_by_order.get(oid, {})
 
-                # V6 keeps V3's company/login selection authoritative.  The
+                # V6.3 keeps V3's company/login selection authoritative.  The
                 # transformed V3 row already contains the exact ShedSuite login
                 # selected by COMPANY_RULES as `_login`.  When it is present we
                 # use ONLY that account, so one company's order is never searched

@@ -90,6 +90,135 @@ DEFAULT_MODEL_SERIES = {
     'lsr_tx': {'label': 'LSR TX', 'prefix': '0701', 'last_used': '0701-832', 'example': ''},
 }
 
+# Used-building contract rules. RTO Pro does not allow a contract number to be
+# reused, while a used building must keep its original MODEL1.  V6.3 therefore
+# keeps MODEL1 untouched and assigns CONTRACT = MODEL1 + suffix.
+USED_CONTRACT_SUFFIXES = ['U'] + [chr(c) for c in range(ord('A'), ord('Z') + 1) if chr(c) != 'U']
+
+
+def _contract_key(value) -> str:
+    return str(value or '').strip().upper()
+
+
+def used_model_history(model: str, existing_contracts) -> list[str]:
+    """Return historical RTO contracts that identify MODEL1 as previously used."""
+    base = _contract_key(model)
+    if not base:
+        return []
+    matches = []
+    for item in existing_contracts or []:
+        if isinstance(item, dict):
+            contract = item.get('contract', '')
+        elif isinstance(item, (tuple, list)):
+            contract = item[0] if item else ''
+        else:
+            contract = item
+        c = _contract_key(contract)
+        if not c:
+            continue
+        if c == base:
+            matches.append(str(contract).strip())
+            continue
+        if c.startswith(base):
+            suffix = c[len(base):]
+            if suffix in USED_CONTRACT_SUFFIXES:
+                matches.append(str(contract).strip())
+    return list(dict.fromkeys(matches))
+
+
+def next_used_contract(model: str, unavailable_contracts) -> tuple[str, str]:
+    """Choose U first, then A/B/C... while respecting RTO's 10-char limit."""
+    base = str(model or '').strip()
+    if not base:
+        return '', ''
+    unavailable = {_contract_key(x) for x in (unavailable_contracts or []) if _contract_key(x)}
+    for suffix in USED_CONTRACT_SUFFIXES:
+        candidate = f'{base}{suffix}'
+        if len(candidate) <= 10 and _contract_key(candidate) not in unavailable:
+            return candidate, suffix
+    return '', ''
+
+
+def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref: ReferenceData) -> None:
+    """Auto-detect prior-use buildings and reserve a unique suffixed contract."""
+    source_by_order = {
+        str(x.get('Customer Order Id', '') or '').strip(): x
+        for x in source_rows
+    }
+    existing = [
+        str(x.get('contract', '') or '').strip()
+        for x in (ref.existing_contracts or [])
+        if str(x.get('contract', '') or '').strip()
+    ]
+    unavailable = list(existing)
+
+    for row in rows:
+        model = str(row.get('MODEL1', '') or '').strip()
+        order_id = str(row.get('_source_order_id', '') or '').strip()
+        src = source_by_order.get(order_id, {})
+        condition = str(src.get('Condition', '') or row.get('_source_condition', '') or '').strip()
+        condition_low = condition.casefold()
+        history = used_model_history(model, existing)
+
+        condition_detected = any(
+            token in condition_low
+            for token in ('used', 'pre-owned', 'preowned', 'repo', 'repossessed')
+        )
+        detected = bool(history or condition_detected)
+
+        reasons = []
+        if history:
+            reasons.append('RTO Pro history: ' + ', '.join(history[:4]))
+        if condition_detected:
+            reasons.append('ShedSuite condition: ' + condition)
+
+        row['_used_detected'] = detected
+        row['_used_building'] = detected
+        row['_used_detection_reason'] = ' · '.join(reasons)
+        row['_used_base_contract'] = model
+        row['_used_contract_suffix'] = ''
+        row['_used_contract_error'] = ''
+
+        if detected:
+            contract, suffix = next_used_contract(model, unavailable)
+            if contract:
+                row['CONTRACT'] = contract
+                row['_used_contract_suffix'] = suffix
+                unavailable.append(contract)
+                row.setdefault('_warnings', []).append(
+                    f'Used building detected; MODEL1 kept as {model} and CONTRACT set to {contract}'
+                )
+            else:
+                row['_used_contract_error'] = (
+                    'No available used-building suffix fits the 10-character RTO contract limit.'
+                )
+                row.setdefault('_warnings', []).append(row['_used_contract_error'])
+        else:
+            # Reserve the normal contract so another used row in the same upload
+            # cannot accidentally choose it.
+            current = str(row.get('CONTRACT', '') or '').strip()
+            if current:
+                unavailable.append(current)
+
+
+def add_contract_history_to_refs(refs: dict, existing_contracts) -> dict:
+    """Expose only contract identifiers needed by the browser-side suffix picker."""
+    refs = dict(refs or {})
+    vals = []
+    for item in existing_contracts or []:
+        if isinstance(item, dict):
+            value = item.get('contract', '')
+        elif isinstance(item, (tuple, list)):
+            value = item[0] if item else ''
+        else:
+            value = item
+        value = str(value or '').strip()
+        if value:
+            vals.append(value)
+    refs['existing_contracts'] = list(dict.fromkeys(vals))
+    return refs
+
+
 load_dotenv(BASE / '.env')
 
 app = Flask(__name__)
@@ -814,10 +943,10 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
     dsn, user, password = _job_db_credentials(jp)
 
     ref = load_reference_data(dsn, user, password)
-    refs = ref.as_client_dict()
+    contract_accounts = fetch_rto_contract_accounts(dsn, user, password)
+    refs = add_contract_history_to_refs(ref.as_client_dict(), contract_accounts)
     (jp / 'refs.json').write_text(json.dumps(refs, indent=2), encoding='utf-8')
 
-    contract_accounts = fetch_rto_contract_accounts(dsn, user, password)
     refresh_model_tracker_from_contracts(contract_accounts)
 
     account_by_contract = {
@@ -861,6 +990,68 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
         'accounts_matched': matched,
         'refs': refs,
     }
+
+
+def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> list[str]:
+    """Recheck V6.3 used suffixes immediately before launching RTO Pro.
+
+    If Firebird is reachable, this uses the newest contract list. Otherwise it
+    falls back to the contract list captured when the job was created/refreshed.
+    """
+    live_contracts = []
+    try:
+        dsn, user, password = _job_db_credentials(jp)
+        live_contracts = [c for c, _a in fetch_rto_contract_accounts(dsn, user, password)]
+    except Exception:
+        live_contracts = list((refs or {}).get('existing_contracts') or [])
+
+    unavailable = {_contract_key(x) for x in live_contracts if _contract_key(x)}
+    changes = []
+
+    # Normal rows reserve their exact contract numbers first.
+    for row in rows:
+        used = row.get('_used_building') is True or str(row.get('_used_building', '')).lower() in ('1', 'true', 'yes', 'on')
+        if not used:
+            c = _contract_key(row.get('CONTRACT', ''))
+            if c:
+                unavailable.add(c)
+
+    for row in rows:
+        used = row.get('_used_building') is True or str(row.get('_used_building', '')).lower() in ('1', 'true', 'yes', 'on')
+        if not used:
+            continue
+
+        model = str(row.get('MODEL1', '') or '').strip()
+        current = str(row.get('CONTRACT', '') or '').strip()
+        current_key = _contract_key(current)
+        model_key = _contract_key(model)
+        suffix = current_key[len(model_key):] if model_key and current_key.startswith(model_key) else ''
+        current_valid = (
+            bool(current)
+            and current_key not in unavailable
+            and suffix in USED_CONTRACT_SUFFIXES
+            and len(current) <= 10
+        )
+
+        if current_valid:
+            row['_used_contract_suffix'] = suffix
+            row['_used_contract_error'] = ''
+            unavailable.add(current_key)
+            continue
+
+        candidate, new_suffix = next_used_contract(model, unavailable)
+        if not candidate:
+            row['_used_contract_error'] = 'No available used-building suffix fits the 10-character RTO contract limit.'
+            continue
+
+        if current != candidate:
+            changes.append(f"{row.get('NAME', 'Contract')}: {current or '(blank)'} → {candidate}")
+        row['CONTRACT'] = candidate
+        row['_used_contract_suffix'] = new_suffix
+        row['_used_contract_error'] = ''
+        unavailable.add(_contract_key(candidate))
+
+    return changes
 
 
 def rto_images_root() -> Path:
@@ -1272,18 +1463,44 @@ def write_import_csv(rows: list[dict], path: Path):
 
 
 def validate_rto_runtime(rows: list[dict]) -> list[str]:
-    """Catch the RTO Pro field limits that can block a live import."""
+    """Catch the RTO Pro field limits and V6.3 used-building rules."""
     errors = []
+    seen_contracts: set[str] = set()
     for i, r in enumerate(rows, 1):
+        name = str(r.get('NAME') or f'Row {i}').strip()
+        contract = str(r.get('CONTRACT') or '').strip()
+        model = str(r.get('MODEL1') or '').strip()
         if not str(r.get('NAME') or '').strip():
             errors.append(f'Row {i}: NAME is blank.')
         if not str(r.get('STORE') or '').strip():
             errors.append(f'Row {i}: STORE is blank.')
-        if len(str(r.get('CONTRACT') or '')) > 10:
+        if len(contract) > 10:
             errors.append(f'Row {i}: CONTRACT exceeds 10 characters.')
-        if len(str(r.get('MODEL1') or '')) > 15:
+        if len(model) > 15:
             errors.append(f'Row {i}: MODEL1 exceeds 15 characters.')
-    return errors
+        if contract:
+            ck = _contract_key(contract)
+            if ck in seen_contracts:
+                errors.append(f'{name}: CONTRACT {contract} is duplicated in this import.')
+            seen_contracts.add(ck)
+
+        used = r.get('_used_building') is True or str(r.get('_used_building', '')).lower() in ('1', 'true', 'yes', 'on')
+        if used:
+            if not model:
+                errors.append(f'{name}: used building needs a MODEL1.')
+            if not contract:
+                errors.append(f'{name}: used building needs a suffixed CONTRACT.')
+            elif _contract_key(contract) == _contract_key(model):
+                errors.append(f'{name}: used building CONTRACT must have a suffix; MODEL1 must stay unchanged.')
+            elif not _contract_key(contract).startswith(_contract_key(model)):
+                errors.append(f'{name}: used building CONTRACT must be MODEL1 plus a suffix.')
+            else:
+                suffix = _contract_key(contract)[len(_contract_key(model)):]
+                if suffix not in USED_CONTRACT_SUFFIXES:
+                    errors.append(f'{name}: used building suffix {suffix or "(blank)"} is not valid.')
+            if str(r.get('_used_contract_error') or '').strip():
+                errors.append(f'{name}: {r.get("_used_contract_error")}')
+    return list(dict.fromkeys(errors))
 
 
 def _write_rto_runtime_csv(rows: list[dict], path: Path):
@@ -1372,6 +1589,11 @@ def write_review_csv(rows: list[dict], path: Path):
         '_dealer_name',
         'MODEL1',
         'CONTRACT',
+        '_used_building',
+        '_used_detected',
+        '_used_contract_suffix',
+        '_used_detection_reason',
+        '_used_contract_error',
         '_set_contract',
         'ZONE',
         'TAXZONE',
@@ -1554,6 +1776,10 @@ def process():
     # Keep DOB as the exact calendar date written in the ShedSuite CSV.
     fix_dobs_from_source(rows, source_rows)
 
+    # V6.3 used-building workflow. This is deliberately post-transform so the
+    # original V3 mapping/model logic stays authoritative.
+    apply_used_building_defaults(rows, source_rows, ref)
+
     # Read LAST-USED numbers from the live RTO Pro contracts table.
     # Do not count this pending CSV as "used" until RTO Pro actually imports it.
     try:
@@ -1584,7 +1810,7 @@ def process():
         encoding='utf-8',
     )
 
-    refs = ref.as_client_dict()
+    refs = add_contract_history_to_refs(ref.as_client_dict(), ref.existing_contracts)
 
     (jp / 'refs.json').write_text(
         json.dumps(refs, indent=2),
@@ -1822,6 +2048,12 @@ def save(job):
             '_dealer_name',
             '_set_contract',
             '_warnings',
+            '_used_building',
+            '_used_detected',
+            '_used_detection_reason',
+            '_used_base_contract',
+            '_used_contract_suffix',
+            '_used_contract_error',
         ]:
             if k in new:
                 r[k] = new[k]
@@ -2211,7 +2443,14 @@ def import_pdfs_to_rto(job):
 
 @app.post('/run-rto/<job>')
 def run_rto(job):
-    jp, rows, _, _ = load_job(job)
+    jp, rows, refs, _ = load_job(job)
+
+    # Recheck used-building suffixes against the newest RTO data just before
+    # import. If U was taken meanwhile, V6.3 advances to A/B/C... automatically.
+    suffix_changes = ensure_used_contracts_available(jp, rows, refs)
+    if suffix_changes:
+        save_job_rows(jp, rows)
+        flash('Used-building contract suffix refreshed: ' + ' | '.join(suffix_changes[:6]), 'ok')
 
     errors = validate_rto_runtime(rows)
     if errors:

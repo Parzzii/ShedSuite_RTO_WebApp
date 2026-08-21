@@ -26,6 +26,8 @@
   const zones = Array.isArray(refs.zones) ? refs.zones : [];
   const taxzones = Array.isArray(refs.taxzones) ? refs.taxzones : [];
   const agents = Array.isArray(refs.agents) ? refs.agents : [];
+  const existingContracts = new Set((Array.isArray(refs.existing_contracts) ? refs.existing_contracts : []).map(x => clean(x).toUpperCase()).filter(Boolean));
+  const usedSuffixes = ['U', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').filter(x => x !== 'U')];
 
   function key(obj, ...names) {
     for (const n of names) if (obj && obj[n] !== undefined) return obj[n];
@@ -120,6 +122,51 @@
     return html;
   }
 
+  function boolish(v) {
+    return v === true || ['1','true','yes','on'].includes(clean(v).toLowerCase());
+  }
+
+  function usedContractCandidate(i) {
+    const r=rows[i];
+    const model=clean(r.MODEL1);
+    if (!model) return {contract:'',suffix:'',error:'Used building needs a model number.'};
+    const unavailable=new Set(existingContracts);
+    rows.forEach((other,j)=>{
+      if (j===i) return;
+      const c=clean(other.CONTRACT).toUpperCase();
+      if (c) unavailable.add(c);
+    });
+    for (const suffix of usedSuffixes) {
+      const candidate=`${model}${suffix}`;
+      if (candidate.length <= 10 && !unavailable.has(candidate.toUpperCase())) {
+        return {contract:candidate,suffix,error:''};
+      }
+    }
+    return {contract:'',suffix:'',error:'No available suffix fits RTO Pro’s 10-character contract limit.'};
+  }
+
+  function applyUsedBuilding(i, enabled, manual=true) {
+    const r=rows[i];
+    r._used_building=!!enabled;
+    if (manual) r._used_manual_override=true;
+    r._used_base_contract=clean(r.MODEL1);
+    r._used_contract_error='';
+    r._used_contract_suffix='';
+    if (enabled) {
+      const choice=usedContractCandidate(i);
+      if (choice.contract) {
+        r.CONTRACT=choice.contract;
+        r._used_contract_suffix=choice.suffix;
+      } else {
+        r.CONTRACT='';
+        r._used_contract_error=choice.error;
+      }
+    } else {
+      // Normal V3/V6 behavior: contract follows the building model.
+      r.CONTRACT=clean(r.MODEL1);
+    }
+  }
+
   function rowProblems(r) {
     const p=[];
     if (!clean(r.STORE)) p.push('Store');
@@ -128,7 +175,12 @@
     if (!clean(r.CONTRACT)) p.push('Contract #');
     if (!clean(r.ZONE)) p.push('Zone');
     if (!clean(r.TAXZONE)) p.push('Tax zone');
-    return p;
+    if (boolish(r._used_building)) {
+      const model=clean(r.MODEL1).toUpperCase(), contract=clean(r.CONTRACT).toUpperCase();
+      const suffix=(model && contract.startsWith(model)) ? contract.slice(model.length) : '';
+      if (clean(r._used_contract_error) || !contract || contract===model || !contract.startsWith(model) || !usedSuffixes.includes(suffix) || contract.length>10) p.push('Used contract suffix');
+    }
+    return [...new Set(p)];
   }
 
   function sourceMatchText(r) {
@@ -159,7 +211,18 @@
     const nextSuggestion=clean(r._next_model);
     const stockSuggestion=clean(r._stock_model);
     const contractSuggestion=clean(r._set_contract);
+    const used=boolish(r._used_building);
+    const detected=boolish(r._used_detected);
+    const reason=clean(r._used_detection_reason);
+    const usedError=clean(r._used_contract_error);
+    const usedStatus = used
+      ? `<span class="used-pill active">USED BUILDING${r._used_contract_suffix?` · ${esc(r._used_contract_suffix)}`:''}</span>`
+      : (detected ? '<span class="used-pill detected">USED DETECTED</span>' : '');
     return `<div class="tab-section">
+      <div class="used-building-box ${used?'active':''} ${detected?'detected':''}">
+        <label class="used-checkbox"><input type="checkbox" class="used-building-toggle" data-i="${i}" ${used?'checked':''}><span><strong>Used building</strong><small>Keep the same Model # and give the RTO contract a unique suffix.</small></span></label>
+        <div class="used-building-status">${usedStatus}${reason?`<small>${esc(reason)}</small>`:''}${usedError?`<small class="used-error">${esc(usedError)}</small>`:''}</div>
+      </div>
       <div class="mapping-grid top-grid">
         <label class="field emphasis"><span>Store</span><select class="store-select" data-i="${i}">${storeOptions(r.STORE)}</select><small>${esc(r._store_title || findStoreTitle(r.STORE) || 'Choose per contract')}</small></label>
         <label class="field emphasis dealer-field"><span>Dealer</span><select class="dealer-select" data-i="${i}">${dealerOptions(r)}</select><small>Filtered by selected Store</small></label>
@@ -167,8 +230,8 @@
         <div class="field suggestion-field"><span>Account</span><input data-i="${i}" data-field="ACCOUNT" value="${esc(r.ACCOUNT)}" placeholder="existing/new account"><div class="suggestions">${Array.isArray(r._account_suggestions)?r._account_suggestions.map(a=>`<button type="button" class="chip suggestion" data-i="${i}" data-field="ACCOUNT" data-value="${esc(a)}">Existing ${esc(a)}</button>`).join(''):''}</div></div>
       </div>
       <div class="mapping-grid model-grid">
-        <div class="field suggestion-field"><span>Model #</span><input data-i="${i}" data-field="MODEL1" value="${esc(r.MODEL1)}"><div class="suggestions">${inventorySuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(inventorySuggestion)}">Inventory ${esc(inventorySuggestion)}</button>`:''}${stockSuggestion?`<button type="button" class="chip suggestion stock" data-i="${i}" data-field="MODEL1" data-value="${esc(stockSuggestion)}">Stock ${esc(stockSuggestion)}</button>`:''}${nextSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(nextSuggestion)}">Next ${esc(nextSuggestion)}</button>`:''}</div></div>
-        <div class="field suggestion-field"><span>Contract #</span><input data-i="${i}" data-field="CONTRACT" value="${esc(r.CONTRACT)}"><div class="suggestions"><button type="button" class="chip copy-model" data-i="${i}">Copy Model #</button>${contractSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="CONTRACT" data-value="${esc(contractSuggestion)}">Order ${esc(contractSuggestion)}</button>`:''}</div></div>
+        <div class="field suggestion-field"><span>Model #</span><input data-i="${i}" data-field="MODEL1" value="${esc(r.MODEL1)}"><div class="suggestions">${inventorySuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(inventorySuggestion)}">Inventory ${esc(inventorySuggestion)}</button>`:''}${stockSuggestion?`<button type="button" class="chip suggestion stock" data-i="${i}" data-field="MODEL1" data-value="${esc(stockSuggestion)}">Stock ${esc(stockSuggestion)}</button>`:''}${!used && nextSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(nextSuggestion)}">Next ${esc(nextSuggestion)}</button>`:''}</div>${used?'<small class="used-model-note">Used: keep the original building model number.</small>':''}</div>
+        <div class="field suggestion-field"><span>Contract #</span><input data-i="${i}" data-field="CONTRACT" value="${esc(r.CONTRACT)}" ${used?'readonly aria-readonly="true"':''}><div class="suggestions">${!used?`<button type="button" class="chip copy-model" data-i="${i}">Copy Model #</button>`:''}${!used && contractSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="CONTRACT" data-value="${esc(contractSuggestion)}">Order ${esc(contractSuggestion)}</button>`:''}${used && r._used_contract_suffix?`<span class="chip used-chip">Suffix ${esc(r._used_contract_suffix)}</span>`:''}</div></div>
         <label class="field"><span>Zone</span><select class="zone-select" data-i="${i}">${zoneOptions(r)}</select><small>${esc(r._zone_selector || '')}</small></label>
         <div class="field readout-field"><span>Tax Zone</span><strong>${esc(r.TAXZONE || 'Needs selection')}</strong><small>Change it in Tax & Address</small></div>
       </div>
@@ -317,7 +380,7 @@
     return `<article class="contract-card ${needs?'needs-review':'ready'}" data-index="${i}">
       <header class="contract-header">
         <div class="contract-identity"><span class="status-dot"></span><div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>Order <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span></div></div></div>
-        <div class="contract-header-actions"><span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button></div>
+        <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button></div>
       </header>
       <div class="source-strip"><span class="source-label">ShedSuite dealer</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
       <nav class="card-tabs" aria-label="Contract sections">
@@ -442,6 +505,12 @@
       if (['CELL','REFPHONE1','REFPHONE2','REFERENCE1','REFRELATION1','REFERENCE2','REFRELATION2'].includes(field)) applyPhoneRule(i,false);
       if (['MODEL1','CONTRACT','DEALERID'].includes(field)) updateStats();
     }));
+    document.querySelectorAll('input[data-field="MODEL1"]').forEach(el=>el.addEventListener('change',e=>{
+      const i=+e.target.dataset.i; if (boolish(rows[i]._used_building)) { applyUsedBuilding(i,true,false); render(); }
+    }));
+    document.querySelectorAll('.used-building-toggle').forEach(el=>el.addEventListener('change',e=>{
+      const i=+e.target.dataset.i; applyUsedBuilding(i,e.target.checked,true); render();
+    }));
     document.querySelectorAll('input[data-helper]').forEach(el=>el.addEventListener('input',e=>{
       const i=+e.target.dataset.i; rows[i][e.target.dataset.helper]=e.target.value;
       if (e.target.dataset.helper==='_secondary_phone') applyPhoneRule(i,false);
@@ -465,7 +534,7 @@
       const i=+btn.dataset.i; const c=clean(rows[i]._pdf_coordinates); const d=clean(rows[i].DIRECTIONS);
       if (c && !d.includes(c)) rows[i].DIRECTIONS=c+(d?`      ${d}`:''); render();
     }));
-    document.querySelectorAll('.suggestion').forEach(btn=>btn.addEventListener('click',()=>{ setField(+btn.dataset.i,btn.dataset.field,btn.dataset.value,true); }));
+    document.querySelectorAll('.suggestion').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; setField(i,btn.dataset.field,btn.dataset.value,false); if (btn.dataset.field==='MODEL1' && boolish(rows[i]._used_building)) applyUsedBuilding(i,true,false); render(); }));
     document.querySelectorAll('.copy-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].CONTRACT=rows[i].MODEL1; render(); }));
     document.querySelectorAll('.all-btn').forEach(btn=>btn.addEventListener('click',()=>openAllFields(+btn.dataset.i)));
     document.querySelectorAll('.source-btn').forEach(btn=>btn.addEventListener('click',()=>openSource(+btn.dataset.i)));
@@ -510,6 +579,7 @@
     headers.forEach(h=>rows[editingIndex][h]=clean(allFieldDraft[h]));
     rows[editingIndex]._store_title=findStoreTitle(rows[editingIndex].STORE) || rows[editingIndex]._store_title;
     rows[editingIndex]._dealer_name=findDealerName(rows[editingIndex].DEALERID) || rows[editingIndex]._dealer_name;
+    if (boolish(rows[editingIndex]._used_building)) applyUsedBuilding(editingIndex,true,false);
     allFieldsDialog.close(); editingIndex=null; allFieldDraft=null; render();
   });
 
