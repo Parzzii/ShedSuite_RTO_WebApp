@@ -51,6 +51,19 @@
       <a class="button ghost push-right" href="{{ url_for('download', job=job, kind='review') }}">Review report CSV</a>
     </section>
 
+    <section id="deliveryProgress" class="delivery-progress hidden" aria-live="polite">
+      <div class="delivery-progress-head">
+        <div>
+          <div class="eyebrow">BACKGROUND TASK</div>
+          <h2>Delivery Certificates</h2>
+          <p id="deliveryProgressText">Preparing background Chromium…</p>
+        </div>
+        <div class="delivery-progress-count"><strong id="deliveryProgressCount">0/0</strong><span id="deliveryWorkerState">Starting</span></div>
+      </div>
+      <div class="delivery-progress-track"><span id="deliveryProgressBar"></span></div>
+      <div id="deliveryProgressStats" class="delivery-progress-stats"></div>
+    </section>
+
     <div id="validationBanner" class="validation-banner hidden"></div>
     <div id="cards" class="contract-list"></div>
 

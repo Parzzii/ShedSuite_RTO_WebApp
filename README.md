@@ -1,8 +1,19 @@
-# ShedSuite → RTO Pro Web App V6.3.6
+# ShedSuite → RTO Pro Web App V7
 
-V6.3.6 adds immediate per-contract Discard on the review screen and normalizes 11-digit US phone numbers beginning with country code 1 before applying the existing phone comparison rule. It also retains the V6.3.5 theme fixes and expanded hidden Cyberpunk palette.
+V7 adds immediate per-contract Discard on the review screen and normalizes 11-digit US phone numbers beginning with country code 1 before applying the existing phone comparison rule. It also retains the V6.3.5 theme fixes and expanded hidden Cyberpunk palette.
 
-V6.3.6 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+V7 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+
+## V7 background Delivery Certificates
+
+- Review/edit opens after the fast ShedSuite CSV/direct-PDF work; Delivery Certificate Chromium no longer blocks the page.
+- Chromium runs **headless in a background worker** and reuses login contexts during the job.
+- Review page shows live queued/downloading/ready/missing progress without rerendering or wiping unsaved edits.
+- Missing certificates can be retried; queued/missing certificates can be skipped.
+- Discarding a contract causes the background worker to skip it and removes any packet created after discard.
+- Certificate completion merges only server-owned PDF metadata into the latest saved row, preventing background work from overwriting user edits.
+- Saving edits also preserves newer background certificate metadata if the browser loaded an older copy.
+
 
 ## V3 review workflow
 
@@ -111,7 +122,7 @@ The Used Building suffix control is now a free-text field. The app still auto-su
 
 
 
-## V6.3.6 discard + phone normalization
+## V7 discard + phone normalization
 
 - Each review card has a red **Discard** button. After confirmation, that contract is immediately removed from the current job, its combined PDF is removed, and the RTO CSV/XML/ZIP are rebuilt. Nothing is deleted from ShedSuite itself.
 - US phone numbers exported as 11 digits with a leading country code `1` are normalized to the existing `###-###-####` format. The same Primary / Secondary / Ref 1 / Ref 2 comparison rule then runs on the normalized 10 digits.
@@ -130,6 +141,6 @@ upper-cased value.
 
 - Added a persistent normal Dark Mode with a visible Light/Dark toggle.
 - Added a hidden Cyberpunk easter-egg theme. It is intentionally absent from the normal theme control.
-- Secret activation: press `Alt + Shift + K` anywhere, or click the V6.3.6 version label five times quickly on the landing page.
+- Secret activation: press `Alt + Shift + K` anywhere, or click the V7 version label five times quickly on the landing page.
 - The selected theme is stored only in the browser (`localStorage`) and follows you across app pages.
 - Clicking the normal theme button while Cyberpunk is active returns to normal Dark Mode.

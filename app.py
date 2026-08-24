@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 import xml.dom.minidom
 from pathlib import Path
@@ -57,6 +59,17 @@ MODEL_TRACKER_FILE = BASE / 'model_series.json'
 # The web app keeps DB passwords in memory only for the life of this local
 # Python process. They are never written into the job folder.
 JOB_DB_PASSWORDS: dict[str, str] = {}
+
+# V7 background Delivery Certificate workers. Each job gets its own lock so
+# browser progress can be persisted without overwriting edits made in the UI.
+JOB_LOCKS: dict[str, threading.RLock] = {}
+CERT_ACTIVE: set[str] = set()
+CERT_ACTIVE_LOCK = threading.Lock()
+
+def _job_lock(job: str) -> threading.RLock:
+    if job not in JOB_LOCKS:
+        JOB_LOCKS[job] = threading.RLock()
+    return JOB_LOCKS[job]
 
 # These are the SAME contract-number ranges used by the Excel workbook's
 # "Next model" formulas. This matters because Magnolia GA/SC/NC/TN all use
@@ -1629,14 +1642,209 @@ def build_package(jp: Path):
 
 
 def save_job_rows(jp: Path, rows: list[dict]):
-    (jp / 'rows.json').write_text(
-        json.dumps(rows, indent=2),
-        encoding='utf-8',
+    # V7 serializes writes with the certificate worker so edits and background
+    # PDF completion cannot overwrite one another.
+    with _job_lock(jp.name):
+        (jp / 'rows.json').write_text(
+            json.dumps(rows, indent=2),
+            encoding='utf-8',
+        )
+        write_import_csv(rows, jp / 'RTOProImport.csv')
+        write_review_csv(rows, jp / 'Review_Report.csv')
+        write_xmls(rows, jp / 'XML_Files', jp / 'Combined_Files')
+        build_package(jp)
+
+
+def _certificate_status_path(jp: Path) -> Path:
+    return jp / 'delivery_certificate_status.json'
+
+
+def _read_certificate_status(jp: Path) -> dict:
+    p = _certificate_status_path(jp)
+    if not p.exists():
+        return {'active': False, 'complete': True, 'items': {}, 'updated_at': ''}
+    try:
+        data = json.loads(p.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {'active': False, 'complete': True, 'items': {}}
+    except Exception:
+        return {'active': False, 'complete': False, 'items': {}, 'error': 'Could not read certificate status.'}
+
+
+def _write_certificate_status(jp: Path, data: dict) -> None:
+    data = dict(data or {})
+    data['updated_at'] = datetime.now().isoformat(timespec='seconds')
+    temp = _certificate_status_path(jp).with_suffix('.tmp')
+    temp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+    temp.replace(_certificate_status_path(jp))
+
+
+def _initialize_certificate_status(jp: Path, rows: list[dict], active: bool) -> None:
+    items = {}
+    for r in rows:
+        oid = str(r.get('_source_order_id', '') or '').strip()
+        if not oid:
+            continue
+        items[oid] = {
+            'status': 'queued' if active else 'not_requested',
+            'name': str(r.get('NAME', '') or oid),
+            'detail': 'Waiting for background Chromium…' if active else 'Delivery Certificate was not requested.',
+        }
+    _write_certificate_status(jp, {
+        'active': active,
+        'complete': not active,
+        'headless': True,
+        'items': items,
+    })
+
+
+def _merge_certificate_results(job: str, worker_rows: list[dict], cert_warnings: list[str]) -> None:
+    jp = job_path(job)
+    with _job_lock(job):
+        if not (jp / 'rows.json').exists():
+            return
+        current = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+        worker_by_order = {str(r.get('_source_order_id', '') or '').strip(): r for r in worker_rows}
+        current_orders = set()
+        for r in current:
+            oid = str(r.get('_source_order_id', '') or '').strip()
+            current_orders.add(oid)
+            wr = worker_by_order.get(oid)
+            if not wr:
+                continue
+            if wr.get('_delivery_certificate') in {'Downloaded', 'Missing'}:
+                for key in ['_delivery_certificate', '_delivery_certificate_method', '_delivery_certificate_name']:
+                    if key in wr:
+                        r[key] = wr.get(key, '')
+            if wr.get('_delivery_certificate') == 'Downloaded':
+                manifest = list(r.get('_pdf_manifest') or [])
+                if 'Delivery Certificate' not in manifest:
+                    manifest.append('Delivery Certificate')
+                r['_pdf_manifest'] = manifest
+                target = jp / 'Combined_Files' / f"{safe_filename(r.get('_pdf_name') or r.get('NAME') or oid)}.pdf"
+                r['_pdf_available'] = target.exists()
+                if target.exists():
+                    try:
+                        doc = fitz.open(target)
+                        r['_pdf_pages'] = len(doc)
+                        doc.close()
+                    except Exception:
+                        pass
+
+        # A contract may have been discarded while Chromium was working. Remove
+        # any packet the worker created for it so it cannot leak into Full ZIP.
+        for oid, wr in worker_by_order.items():
+            if oid in current_orders:
+                continue
+            target = jp / 'Combined_Files' / f"{safe_filename(wr.get('_pdf_name') or wr.get('NAME') or oid)}.pdf"
+            try:
+                if target.exists():
+                    target.unlink()
+            except Exception:
+                pass
+
+        if cert_warnings:
+            wp = jp / 'warnings.json'
+            try:
+                warnings = json.loads(wp.read_text(encoding='utf-8')) if wp.exists() else []
+            except Exception:
+                warnings = []
+            for w in cert_warnings:
+                msg = 'PDF: ' + str(w)
+                if msg not in warnings:
+                    warnings.append(msg)
+            wp.write_text(json.dumps(warnings, indent=2), encoding='utf-8')
+        save_job_rows(jp, current)
+
+
+def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) -> None:
+    jp = job_path(job)
+    try:
+        with _job_lock(job):
+            if not (jp / 'rows.json').exists():
+                return
+            rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+            source_rows = json.loads((jp / 'source_rows.json').read_text(encoding='utf-8')) if (jp / 'source_rows.json').exists() else []
+            if only_order_ids:
+                rows = [r for r in rows if str(r.get('_source_order_id', '') or '').strip() in only_order_ids]
+            status = _read_certificate_status(jp)
+            status['active'] = True
+            status['complete'] = False
+            status['headless'] = True
+            status.setdefault('items', {})
+            for r in rows:
+                oid = str(r.get('_source_order_id', '') or '').strip()
+                if oid:
+                    status['items'][oid] = {'status': 'queued', 'name': str(r.get('NAME', '') or oid), 'detail': 'Waiting for background Chromium…'}
+            _write_certificate_status(jp, status)
+
+        def still_present(oid: str) -> bool:
+            try:
+                with _job_lock(job):
+                    latest = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+                    st = _read_certificate_status(jp)
+                    if str(st.get('items', {}).get(oid, {}).get('status', '')).lower() == 'skipped':
+                        return False
+                return any(str(r.get('_source_order_id', '') or '').strip() == oid for r in latest)
+            except Exception:
+                return False
+
+        def progress(oid: str, state: str, detail: str, row: dict) -> None:
+            with _job_lock(job):
+                st = _read_certificate_status(jp)
+                st.setdefault('items', {})
+                existing_state = str(st['items'].get(oid, {}).get('status', '')).lower()
+                # A discard/skip made in the UI wins over a late browser result.
+                if existing_state in {'discarded', 'skipped'}:
+                    return
+                st['active'] = True
+                st['complete'] = False
+                st['items'][oid] = {
+                    'status': state,
+                    'name': str(row.get('NAME', '') or oid),
+                    'detail': str(detail or ''),
+                }
+                _write_certificate_status(jp, st)
+
+        warnings = append_delivery_certificates(
+            rows, source_rows, jp / 'Combined_Files', BASE,
+            progress=progress, should_process=still_present, headless=True
+        )
+        _merge_certificate_results(job, rows, warnings)
+
+        with _job_lock(job):
+            st = _read_certificate_status(jp)
+            st['active'] = False
+            st['complete'] = True
+            st['finished_at'] = datetime.now().isoformat(timespec='seconds')
+            _write_certificate_status(jp, st)
+    except Exception as exc:
+        try:
+            with _job_lock(job):
+                st = _read_certificate_status(jp)
+                st['active'] = False
+                st['complete'] = True
+                st['error'] = str(exc)
+                _write_certificate_status(jp, st)
+        except Exception:
+            pass
+    finally:
+        with CERT_ACTIVE_LOCK:
+            CERT_ACTIVE.discard(job)
+
+
+def _start_certificate_worker(job: str, only_order_ids: set[str] | None = None) -> bool:
+    with CERT_ACTIVE_LOCK:
+        if job in CERT_ACTIVE:
+            return False
+        CERT_ACTIVE.add(job)
+    thread = threading.Thread(
+        target=_run_certificate_worker,
+        args=(job, only_order_ids),
+        daemon=True,
+        name=f'delivery-cert-{job}',
     )
-    write_import_csv(rows, jp / 'RTOProImport.csv')
-    write_review_csv(rows, jp / 'Review_Report.csv')
-    write_xmls(rows, jp / 'XML_Files', jp / 'Combined_Files')
-    build_package(jp)
+    thread.start()
+    return True
 
 
 def load_job(job: str):
@@ -1645,9 +1853,10 @@ def load_job(job: str):
     if not (jp / 'rows.json').exists():
         abort(404)
 
-    rows = json.loads(
-        (jp / 'rows.json').read_text(encoding='utf-8')
-    )
+    with _job_lock(job):
+        rows = json.loads(
+            (jp / 'rows.json').read_text(encoding='utf-8')
+        )
 
     refs = (
         json.loads((jp / 'refs.json').read_text(encoding='utf-8'))
@@ -1848,18 +2057,16 @@ def process():
             r['_pdf_manifest'] = [name for name, _url in ordered_documents]
             r['_pdf_available'] = target.exists()
 
-        # V5.3 capability transplanted into V3: open ShedSuite only for the
-        # Delivery Certificate and append it LAST.  The module honors V3's
-        # `_login` company mapping so it does not search unrelated companies.
-        try:
-            cert_errors = append_delivery_certificates(
-                rows, source_rows, pdf_dir, BASE
-            )
-            pdf_errors.extend(cert_errors)
-        except Exception as e:
-            pdf_errors.append('Delivery Certificate lookup failed: ' + str(e))
+        # V7: Delivery Certificates no longer block the review page. The
+        # Chromium lookup starts only after the editable rows have been saved,
+        # and runs headless in a daemon worker while the user reviews/edits.
+        for r in rows:
+            r['_delivery_certificate'] = 'Queued'
+            r['_delivery_certificate_method'] = ''
+            r['_delivery_certificate_name'] = ''
 
-        # Run V3's existing PDF extraction against the final packet.
+        # Run V3's existing PDF extraction against the fast/direct packet now.
+        # The background worker appends Delivery Certificate LAST later.
         for r in rows:
             base = safe_filename(r['_pdf_name'])
             target = pdf_dir / f'{base}.pdf'
@@ -1912,6 +2119,12 @@ def process():
     )
 
     save_job_rows(jp, rows)
+
+    if request.form.get('download_pdfs') == 'yes':
+        _initialize_certificate_status(jp, rows, active=True)
+        _start_certificate_worker(job)
+    else:
+        _initialize_certificate_status(jp, rows, active=False)
 
     return redirect(
         url_for(
@@ -2004,11 +2217,21 @@ def save(job):
             for h in RTO_HEADERS
         }
 
+        server_owned_metadata = {
+            '_delivery_certificate', '_delivery_certificate_method',
+            '_delivery_certificate_name', '_pdf_manifest', '_pdf_available',
+            '_pdf_pages',
+        }
         for k in metadata:
-            r[k] = new.get(
-                k,
-                old.get(k, ''),
-            )
+            # These fields may change in the background after the browser loaded
+            # the review page. Never let stale browser JSON overwrite them.
+            if k in server_owned_metadata:
+                r[k] = old.get(k, '')
+            else:
+                r[k] = new.get(
+                    k,
+                    old.get(k, ''),
+                )
 
         # Keep the same phone normalization on manually edited values as on
         # the original CSV transform. A leading US country code (1) is ignored.
@@ -2128,6 +2351,15 @@ def api_discard_contract(job, index):
         except Exception:
             pass
 
+    with _job_lock(job):
+        st = _read_certificate_status(jp)
+        if order_id:
+            st.setdefault('items', {})[order_id] = {
+                'status': 'discarded',
+                'name': display_name,
+                'detail': 'Discarded from this import.',
+            }
+            _write_certificate_status(jp, st)
     save_job_rows(jp, rows)
     return jsonify({
         'ok': True,
@@ -2135,6 +2367,66 @@ def api_discard_contract(job, index):
         'order_id': order_id,
         'remaining': len(rows),
     })
+
+
+@app.get('/api/delivery-status/<job>')
+def api_delivery_status(job):
+    jp = job_path(job)
+    if not (jp / 'rows.json').exists():
+        abort(404)
+    with _job_lock(job):
+        status = _read_certificate_status(jp)
+    items = status.get('items', {}) if isinstance(status.get('items', {}), dict) else {}
+    counts = {'queued': 0, 'working': 0, 'ready': 0, 'missing': 0, 'skipped': 0, 'discarded': 0, 'not_requested': 0}
+    for item in items.values():
+        key = str((item or {}).get('status', '')).lower()
+        if key in counts:
+            counts[key] += 1
+    status['counts'] = counts
+    status['total'] = counts['queued'] + counts['working'] + counts['ready'] + counts['missing'] + counts['skipped']
+    status['done'] = counts['ready'] + counts['missing'] + counts['skipped']
+    return jsonify(status)
+
+
+@app.post('/api/delivery-retry/<job>/<order_id>')
+def api_delivery_retry(job, order_id):
+    jp = job_path(job)
+    if not (jp / 'rows.json').exists():
+        abort(404)
+    with CERT_ACTIVE_LOCK:
+        if job in CERT_ACTIVE:
+            return jsonify({'ok': False, 'error': 'A Delivery Certificate worker is still running. Retry when it finishes.'}), 409
+    with _job_lock(job):
+        rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+        match = next((r for r in rows if str(r.get('_source_order_id', '') or '').strip() == order_id), None)
+        if not match:
+            return jsonify({'ok': False, 'error': 'Contract no longer exists.'}), 404
+        st = _read_certificate_status(jp)
+        st.setdefault('items', {})[order_id] = {
+            'status': 'queued',
+            'name': str(match.get('NAME', '') or order_id),
+            'detail': 'Queued for retry…',
+        }
+        st['active'] = True
+        st['complete'] = False
+        _write_certificate_status(jp, st)
+    if not _start_certificate_worker(job, {order_id}):
+        return jsonify({'ok': False, 'error': 'A Delivery Certificate worker is already running. Retry when it finishes.'}), 409
+    return jsonify({'ok': True})
+
+
+@app.post('/api/delivery-skip/<job>/<order_id>')
+def api_delivery_skip(job, order_id):
+    jp = job_path(job)
+    if not (jp / 'rows.json').exists():
+        abort(404)
+    with _job_lock(job):
+        st = _read_certificate_status(jp)
+        item = st.setdefault('items', {}).setdefault(order_id, {})
+        item['status'] = 'skipped'
+        item['detail'] = 'Skipped by user.'
+        _write_certificate_status(jp, st)
+    return jsonify({'ok': True})
 
 
 @app.post('/api/ziptax/<job>/<int:index>')

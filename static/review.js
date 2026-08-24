@@ -16,6 +16,8 @@
   const activeTabs = {};
   let editingIndex = null;
   let allFieldDraft = null;
+  let deliveryStatus = {items:{}, counts:{}, active:false, complete:false};
+  let deliveryPollTimer = null;
 
   const esc = (s) => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -392,6 +394,101 @@
     </div>`;
   }
 
+  function certItemForRow(r) {
+    const oid=clean(r._source_order_id);
+    return (deliveryStatus.items && deliveryStatus.items[oid]) || null;
+  }
+
+  function certChip(r) {
+    const item=certItemForRow(r);
+    const state=clean(item?.status || (r._delivery_certificate==='Downloaded'?'ready':r._delivery_certificate==='Missing'?'missing':r._delivery_certificate==='Queued'?'queued':'not_requested')).toLowerCase();
+    const labels={queued:'CERT QUEUED',working:'CERT DOWNLOADING',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED',not_requested:''};
+    const label=labels[state] || state.toUpperCase();
+    return label ? `<span class="delivery-chip ${esc(state)}" data-cert-order="${esc(r._source_order_id)}">${esc(label)}</span>` : '';
+  }
+
+  function certActions(r,i) {
+    const item=certItemForRow(r);
+    const state=clean(item?.status || '').toLowerCase();
+    const detail=clean(item?.detail || '');
+    const oid=clean(r._source_order_id);
+    let buttons='';
+    if (state==='missing' || state==='skipped') buttons+=`<button type="button" class="mini-btn cert-retry" data-order="${esc(oid)}">Retry certificate</button>`;
+    if (state==='queued' || state==='missing') buttons+=`<button type="button" class="mini-btn cert-skip" data-order="${esc(oid)}">Skip</button>`;
+    if (state==='ready') buttons+=`<a class="mini-btn" target="_blank" href="/pdf/${encodeURIComponent(window.RTO_JOB)}/${i}">Open combined PDF</a>`;
+    if (!state && !detail) return '';
+    return `<div class="cert-row-actions" data-cert-actions="${esc(oid)}">${certChip(r)}${detail?`<span class="mini-muted">${esc(detail)}</span>`:''}${buttons}</div>`;
+  }
+
+  async function retryCertificate(order, button) {
+    if (!order) return;
+    const old=button?.textContent;
+    if (button){button.disabled=true;button.textContent='Queuing…';}
+    try {
+      const resp=await fetch(`/api/delivery-retry/${encodeURIComponent(window.RTO_JOB)}/${encodeURIComponent(order)}`,{method:'POST'});
+      const data=await resp.json().catch(()=>({}));
+      if (!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      await pollDeliveryStatus();
+    } catch(e) { alert(`Could not retry certificate: ${e.message || e}`); }
+    finally { if(button){button.disabled=false;button.textContent=old;} }
+  }
+
+  async function skipCertificate(order, button) {
+    if (!order) return;
+    try {
+      const resp=await fetch(`/api/delivery-skip/${encodeURIComponent(window.RTO_JOB)}/${encodeURIComponent(order)}`,{method:'POST'});
+      const data=await resp.json().catch(()=>({}));
+      if (!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      await pollDeliveryStatus();
+    } catch(e) { alert(`Could not skip certificate: ${e.message || e}`); }
+  }
+
+  function updateDeliveryProgress() {
+    const box=document.getElementById('deliveryProgress');
+    if (!box) return;
+    const c=deliveryStatus.counts || {};
+    const total=Number(deliveryStatus.total || 0);
+    if (!total && !deliveryStatus.active) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    const done=Number(deliveryStatus.done || 0);
+    const pct=total ? Math.max(0,Math.min(100,Math.round(done*100/total))) : 0;
+    document.getElementById('deliveryProgressBar').style.width=`${pct}%`;
+    document.getElementById('deliveryProgressCount').textContent=`${done}/${total}`;
+    document.getElementById('deliveryWorkerState').textContent=deliveryStatus.active?'Running in background':'Complete';
+    const working=Number(c.working||0), queued=Number(c.queued||0), ready=Number(c.ready||0), missing=Number(c.missing||0), skipped=Number(c.skipped||0);
+    document.getElementById('deliveryProgressText').textContent=deliveryStatus.active ? (working?'Chromium is downloading a certificate. You can keep editing.':'Chromium is running headlessly in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.');
+    document.getElementById('deliveryProgressStats').innerHTML=[ready?`<span>✓ ${ready} Ready</span>`:'',working?`<span>⏳ ${working} Downloading</span>`:'',queued?`<span>○ ${queued} Waiting</span>`:'',missing?`<span>⚠ ${missing} Missing</span>`:'',skipped?`<span>↷ ${skipped} Skipped</span>`:''].filter(Boolean).join('');
+
+    document.querySelectorAll('[data-cert-order]').forEach(el=>{
+      const item=(deliveryStatus.items||{})[el.dataset.certOrder]; if(!item)return;
+      const state=clean(item.status).toLowerCase(); const labels={queued:'CERT QUEUED',working:'CERT DOWNLOADING',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED'};
+      el.className=`delivery-chip ${state}`; el.textContent=labels[state] || state.toUpperCase();
+    });
+    // Update the richer PDF-tab status only when that tab is currently visible.
+    document.querySelectorAll('[data-cert-actions]').forEach(el=>{
+      const oid=el.dataset.certActions; const i=rows.findIndex(r=>clean(r._source_order_id)===oid); if(i<0)return;
+      const item=(deliveryStatus.items||{})[oid] || {}; const state=clean(item.status).toLowerCase();
+      let buttons='';
+      if (state==='missing' || state==='skipped') buttons+=`<button type="button" class="mini-btn cert-retry" data-order="${esc(oid)}">Retry certificate</button>`;
+      if (state==='queued' || state==='missing') buttons+=`<button type="button" class="mini-btn cert-skip" data-order="${esc(oid)}">Skip</button>`;
+      if (state==='ready') buttons+=`<a class="mini-btn" target="_blank" href="/pdf/${encodeURIComponent(window.RTO_JOB)}/${i}">Open combined PDF</a>`;
+      el.innerHTML=`${certChip(rows[i])}${item.detail?`<span class="mini-muted">${esc(item.detail)}</span>`:''}${buttons}`;
+      el.querySelectorAll('.cert-retry').forEach(b=>b.addEventListener('click',()=>retryCertificate(b.dataset.order,b)));
+      el.querySelectorAll('.cert-skip').forEach(b=>b.addEventListener('click',()=>skipCertificate(b.dataset.order,b)));
+    });
+  }
+
+  async function pollDeliveryStatus() {
+    try {
+      const resp=await fetch(`/api/delivery-status/${encodeURIComponent(window.RTO_JOB)}`,{cache:'no-store'});
+      if (!resp.ok) return;
+      deliveryStatus=await resp.json();
+      updateDeliveryProgress();
+      if (deliveryStatus.active && !deliveryPollTimer) deliveryPollTimer=setInterval(pollDeliveryStatus,1500);
+      if (!deliveryStatus.active && deliveryPollTimer) { clearInterval(deliveryPollTimer); deliveryPollTimer=null; }
+    } catch(e) {}
+  }
+
   function pdfTab(r,i) {
     const pdfLink=r._pdf_available ? `<a class="button ghost" target="_blank" href="/pdf/${encodeURIComponent(window.RTO_JOB)}/${i}">Open combined PDF</a>` : '<span class="mini-muted">No PDF loaded</span>';
     return `<div class="tab-section">
@@ -399,6 +496,7 @@
         <div class="pdf-coordinates"><span>Coordinates extracted from PDF</span><strong>${esc(r._pdf_coordinates || 'Coordinates not found')}</strong>${r._pdf_coordinates?`<button type="button" class="mini-btn copy-coordinates" data-i="${i}">Put in Directions</button>`:''}</div>
         <div class="pdf-actions">${pdfLink}</div>
       </div>
+      ${certActions(r,i)}
       <div class="mapping-grid pdf-grid">
         ${inputField(i,'SALESMAN','PDF Salesman / Agent',{emphasis:true,small:r._pdf_salesman?`Extracted: ${r._pdf_salesman}`:'No PDF agent extracted'})}
         ${inputField(i,'AGENT1','RTO Agent (Firebird)',{small:'This is the RTO Pro agent for the selected Store.'})}
@@ -426,7 +524,7 @@
     return `<article class="contract-card ${needs?'needs-review':'ready'}" data-index="${i}">
       <header class="contract-header">
         <div class="contract-identity"><span class="status-dot"></span><div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>Order <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span></div></div></div>
-        <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button><button type="button" class="mini-btn discard-btn" data-i="${i}" title="Remove this contract from the current import">Discard</button></div>
+        <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}${certChip(r)}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button><button type="button" class="mini-btn discard-btn" data-i="${i}" title="Remove this contract from the current import">Discard</button></div>
       </header>
       <div class="source-strip"><span class="source-label">ShedSuite dealer</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
       <nav class="card-tabs" aria-label="Contract sections">
@@ -658,6 +756,8 @@
     document.querySelectorAll('.all-btn').forEach(btn=>btn.addEventListener('click',()=>openAllFields(+btn.dataset.i)));
     document.querySelectorAll('.source-btn').forEach(btn=>btn.addEventListener('click',()=>openSource(+btn.dataset.i)));
     document.querySelectorAll('.discard-btn').forEach(btn=>btn.addEventListener('click',()=>discardContract(+btn.dataset.i,btn)));
+    document.querySelectorAll('.cert-retry').forEach(btn=>btn.addEventListener('click',()=>retryCertificate(btn.dataset.order,btn)));
+    document.querySelectorAll('.cert-skip').forEach(btn=>btn.addEventListener('click',()=>skipCertificate(btn.dataset.order,btn)));
   }
 
   function validate(show=true) {
@@ -719,5 +819,5 @@
   document.getElementById('validateBtn').addEventListener('click',()=>validate(true));
   document.getElementById('saveTopBtn').addEventListener('click',saveAll);
   searchInput.addEventListener('input',render); onlyNeeds.addEventListener('change',render);
-  populateBulkStore(); render();
+  populateBulkStore(); render(); pollDeliveryStatus();
 })();

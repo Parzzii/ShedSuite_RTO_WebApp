@@ -346,14 +346,22 @@ def _append_pdf(target: Path, cert_bytes: bytes) -> None:
         cert.close()
 
 
-async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: Path) -> list[str]:
+async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: Path, progress=None, should_process=None, headless: bool = True) -> list[str]:
     logins, legacy_book, _selected = _legacy_logins(base)
     if not logins:
-        return [
-            'Delivery Certificate: V6.3 could not find Contract_Import.xlsm / Logininfo. '
-            'Put the old Contract_Import.xlsm beside V6.3 or set LEGACY_XLSM_PATH. '
-            'V6.3 intentionally never asks for a ShedSuite password.'
-        ]
+        msg = (
+            'Delivery Certificate: V7 could not find Contract_Import.xlsm / Logininfo. '
+            'Put the old Contract_Import.xlsm beside V7 or set LEGACY_XLSM_PATH. '
+            'V7 intentionally never asks for a ShedSuite password.'
+        )
+        for row in rows:
+            oid = str(row.get('_source_order_id', '')).strip()
+            if oid:
+                row['_delivery_certificate'] = 'Missing'
+                row['_delivery_certificate_method'] = ''
+                if progress:
+                    progress(oid, 'missing', 'Logininfo credentials were not found.', row)
+        return [msg]
 
     src_by_order = {str(x.get('Customer Order Id', '')).strip(): x for x in source_rows}
     login_map = {email.lower(): (email, password) for email, password in logins}
@@ -362,13 +370,19 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
     async with async_playwright() as playwright:
         # The old Excel automation explicitly required visible Chromium; headless
         # mode was unreliable with ShedSuite.
-        browser = await playwright.chromium.launch(headless=False)
+        browser = await playwright.chromium.launch(headless=headless)
         contexts: dict[str, tuple] = {}
         try:
             for row in rows:
                 oid = str(row.get('_source_order_id', '')).strip()
                 if not oid:
                     continue
+                if should_process and not should_process(oid):
+                    # Status is already persisted by the discard/skip action.
+                    # Do not overwrite it here.
+                    continue
+                if progress:
+                    progress(oid, 'working', 'Opening ShedSuite and locating Delivery Certificate…', row)
                 src = src_by_order.get(oid, {})
 
                 # V6.3 keeps V3's company/login selection authoritative.  The
@@ -389,6 +403,8 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
                         )
                         row['_delivery_certificate'] = 'Missing'
                         row['_delivery_certificate_method'] = ''
+                        if progress:
+                            progress(oid, 'missing', f'Login mapping not found for {v3_login}.', row)
                         continue
                 else:
                     # Unknown/manual companies do not have a V3 `_login`. In that
@@ -429,10 +445,14 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
                     row['_delivery_certificate'] = 'Downloaded'
                     row['_delivery_certificate_method'] = method
                     row['_delivery_certificate_name'] = cert_name or 'Delivery Certificate'
+                    if progress:
+                        progress(oid, 'ready', f'Downloaded via {method}.', row)
                 else:
                     row['_delivery_certificate'] = 'Missing'
                     row['_delivery_certificate_method'] = ''
                     warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate: {last_error}")
+                    if progress:
+                        progress(oid, 'missing', last_error, row)
 
             # Keep the fresh cookies for later runs, just as the Excel macro did.
             for email_key, (context, _page) in contexts.items():
@@ -451,6 +471,10 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
     return warnings
 
 
-def append_delivery_certificates(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: Path) -> list[str]:
-    """Synchronous Flask wrapper. ONLY Delivery Certificate uses Chromium."""
-    return asyncio.run(_run(rows, source_rows, pdf_dir, base))
+def append_delivery_certificates(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: Path, progress=None, should_process=None, headless: bool = True) -> list[str]:
+    """Synchronous wrapper used by the V7 background worker.
+
+    Chromium is headless by default so certificate downloads can continue while
+    the user edits contracts in the web app.
+    """
+    return asyncio.run(_run(rows, source_rows, pdf_dir, base, progress=progress, should_process=should_process, headless=headless))

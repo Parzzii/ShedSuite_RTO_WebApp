@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V6.3.6
+ShedSuite RTO Web App V7
 ========================
 
 Base: V3.0.0
@@ -75,8 +75,15 @@ V6.3.4/6.3.5 - Themes
 - Secret: Alt+Shift+K, or click the version label five times quickly on the first page.
 
 
-V6.3.6 - Discard + Phone Normalization
+V7 - Discard + Phone Normalization
 ----------------------------------------
 - Review cards now include a Discard button that immediately removes the selected contract from the current job and rebuilds RTO CSV/XML/ZIP output.
 - The discarded contract's combined PDF is removed from the package as well.
 - 11-digit US phone numbers beginning with country code 1 are reduced to the underlying 10 digits and formatted ###-###-#### before the existing phone comparison rule is applied.
+
+
+V7 - Background Delivery Certificates
+-------------------------------------
+Delivery Certificate Chromium now runs headlessly in a background worker.
+You can review, edit, discard, and save contracts while certificates download.
+The review page shows live progress and supports Retry/Skip for certificate jobs.
