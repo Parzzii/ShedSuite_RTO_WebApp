@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V6.3.5
+ShedSuite RTO Web App V6.3.6
 ========================
 
 Base: V3.0.0
@@ -59,7 +59,7 @@ V6.3.2 - Manually Typed Used-Building Suffix
 - A manual suffix is preserved through RTO Pro import when it is still available.
 
 
-V6.3.5 - Brand/Vendor Normalization
+V6.3.3 - Brand/Vendor Normalization
 -----------------------------------
 BRAND1 and VENDOR1 now normalize ShedSuite manufacturer/company-name variants to
 these exact RTO Pro values: ALPINE, 4 SEASONS, GENESIS, SMART SHED, WESTWOOD SHEDS,
@@ -68,8 +68,15 @@ spacing and common variants such as Lone Star, Smart Sheds, and Four Seasons are
 recognized automatically.
 
 
-V6.3.5 - Themes
+V6.3.4/6.3.5 - Themes
 ----------------
 - Visible persistent Light/Dark mode toggle.
 - Hidden Cyberpunk theme easter egg.
 - Secret: Alt+Shift+K, or click the version label five times quickly on the first page.
+
+
+V6.3.6 - Discard + Phone Normalization
+----------------------------------------
+- Review cards now include a Discard button that immediately removes the selected contract from the current job and rebuilds RTO CSV/XML/ZIP output.
+- The discarded contract's combined PDF is removed from the package as well.
+- 11-digit US phone numbers beginning with country code 1 are reduced to the underlying 10 digits and formatted ###-###-#### before the existing phone comparison rule is applied.

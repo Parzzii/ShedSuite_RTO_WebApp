@@ -38,6 +38,7 @@ from rto_transform import (
     effective_ziptax_api_key,
     ziptax_detail,
     resolve_taxzone,
+    phone,
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
 from delivery_certificate import append_delivery_certificates
@@ -2009,6 +2010,13 @@ def save(job):
                 old.get(k, ''),
             )
 
+        # Keep the same phone normalization on manually edited values as on
+        # the original CSV transform. A leading US country code (1) is ignored.
+        for phone_field in ['CELL', 'PHONE5', 'REFPHONE1', 'REFPHONE2']:
+            r[phone_field] = phone(r.get(phone_field, ''))
+        if '_secondary_phone' in r:
+            r['_secondary_phone'] = phone(r.get('_secondary_phone', ''))
+
         # Save UI helper metadata as well.
         for k in [
             '_store_title',
@@ -2059,6 +2067,74 @@ def api_model_tracker():
         tracker[key]['last_used'] = str(values.get('last_used', tracker[key].get('last_used', '')) or '').strip()
     save_model_tracker(tracker)
     return jsonify({'ok': True})
+
+
+@app.post('/api/discard/<job>/<int:index>')
+def api_discard_contract(job, index):
+    """Permanently remove one uploaded contract from the current job.
+
+    This immediately rebuilds the RTO CSV/XML/ZIP so a discarded ShedSuite
+    row cannot accidentally make it into a later RTO Pro import.
+    """
+    jp, rows, _refs, _warnings = load_job(job)
+    if index < 0 or index >= len(rows):
+        return jsonify({'ok': False, 'error': 'Contract no longer exists.'}), 404
+
+    removed = rows.pop(index)
+    order_id = str(removed.get('_source_order_id', '') or '').strip()
+    display_name = str(removed.get('NAME', '') or '').strip() or f'Row {index + 1}'
+
+    # Keep source-row details aligned with the remaining contracts.
+    source_path = jp / 'source_rows.json'
+    if source_path.exists():
+        try:
+            source_rows = json.loads(source_path.read_text(encoding='utf-8'))
+            if isinstance(source_rows, list):
+                removed_source = False
+                kept = []
+                for src in source_rows:
+                    src_order = str((src or {}).get('Customer Order Id', '') or '').strip() if isinstance(src, dict) else ''
+                    if not removed_source and order_id and src_order == order_id:
+                        removed_source = True
+                        continue
+                    kept.append(src)
+                source_path.write_text(json.dumps(kept, indent=2), encoding='utf-8')
+        except Exception:
+            # Source-row cleanup is helpful for the review dialog, but should
+            # never block the actual contract discard.
+            pass
+
+    # Remove this row's combined packet so it cannot remain inside Full ZIP.
+    pdf_base = safe_filename(removed.get('_pdf_name') or removed.get('NAME') or 'contract')
+    pdf_path = jp / 'Combined_Files' / f'{pdf_base}.pdf'
+    try:
+        if pdf_path.exists():
+            pdf_path.unlink()
+    except Exception:
+        pass
+
+    # Anything created from a prior launch/import is now stale and should be
+    # regenerated only from the reduced row set.
+    for stale_name in [
+        'PDF_Import_Report.csv',
+        'RTOProImport_LAUNCHED.csv',
+        'Run_RTO_Import.cmd',
+        'RTO_Launch_Command.txt',
+    ]:
+        stale = jp / stale_name
+        try:
+            if stale.exists():
+                stale.unlink()
+        except Exception:
+            pass
+
+    save_job_rows(jp, rows)
+    return jsonify({
+        'ok': True,
+        'removed': display_name,
+        'order_id': order_id,
+        'remaining': len(rows),
+    })
 
 
 @app.post('/api/ziptax/<job>/<int:index>')

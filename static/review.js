@@ -21,6 +21,15 @@
   const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   const clean = (s) => String(s ?? '').trim();
   const digits = (s) => String(s ?? '').replace(/\D/g, '');
+  const phoneDigits = (s) => {
+    let d=digits(s);
+    if (d.length===11 && d.startsWith('1')) d=d.slice(1);
+    return d;
+  };
+  const formatUsPhone = (s) => {
+    const d=phoneDigits(s);
+    return d.length===10 ? `${d.slice(0,3)}-${d.slice(3,6)}-${d.slice(6)}` : clean(s);
+  };
   const storeList = Array.isArray(refs.stores) ? refs.stores : [];
   const dealers = Array.isArray(refs.dealers) ? refs.dealers : [];
   const zones = Array.isArray(refs.zones) ? refs.zones : [];
@@ -417,7 +426,7 @@
     return `<article class="contract-card ${needs?'needs-review':'ready'}" data-index="${i}">
       <header class="contract-header">
         <div class="contract-identity"><span class="status-dot"></span><div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>Order <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span></div></div></div>
-        <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button></div>
+        <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button><button type="button" class="mini-btn discard-btn" data-i="${i}" title="Remove this contract from the current import">Discard</button></div>
       </header>
       <div class="source-strip"><span class="source-label">ShedSuite dealer</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
       <nav class="card-tabs" aria-label="Contract sections">
@@ -495,7 +504,7 @@
       applyPhoneSource(i, clean(r._phone_other_source || 'ref1'), true);
       return;
     }
-    const p=digits(r.CELL), s=digits(r._secondary_phone), r1=digits(r.REFPHONE1), r2=digits(r.REFPHONE2);
+    const p=phoneDigits(r.CELL), s=phoneDigits(r._secondary_phone), r1=phoneDigits(r.REFPHONE1), r2=phoneDigits(r.REFPHONE2);
     let source='secondary';
     if (!s) source='ref1';
     else if (p && s===p) source='ref1';
@@ -533,6 +542,56 @@
     }
   }
 
+  function shiftTabsAfterDiscard(removedIndex) {
+    const entries=Object.entries(activeTabs);
+    Object.keys(activeTabs).forEach(k=>delete activeTabs[k]);
+    for (const [rawIndex,tab] of entries) {
+      const idx=Number(rawIndex);
+      if (idx<removedIndex) activeTabs[idx]=tab;
+      else if (idx>removedIndex) activeTabs[idx-1]=tab;
+    }
+  }
+
+  async function discardContract(i, button) {
+    const r=rows[i];
+    if (!r) return;
+    const label=clean(r.NAME) || `Row ${i+1}`;
+    const order=clean(r._source_order_id);
+    const prompt=`Discard ${label}${order?` (Order ${order})`:''}?\n\nThis removes it from this import and rebuilds the RTO files. It does not delete anything from ShedSuite.`;
+    if (!window.confirm(prompt)) return;
+
+    const original=button.textContent;
+    button.disabled=true;
+    button.textContent='Discarding…';
+    try {
+      const resp=await fetch(`/api/discard/${encodeURIComponent(window.RTO_JOB)}/${i}`,{method:'POST'});
+      const data=await resp.json().catch(()=>({}));
+      if (!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+      rows.splice(i,1);
+      if (Array.isArray(sources)) sources.splice(i,1);
+      shiftTabsAfterDiscard(i);
+      validationBanner.classList.remove('hidden','bad');
+      validationBanner.classList.add('good');
+      validationBanner.innerHTML=`<strong>${esc(data.removed || label)} discarded.</strong> ${esc(data.remaining)} contract${Number(data.remaining)===1?'':'s'} remain. RTO CSV/XML/ZIP were rebuilt.`;
+      render();
+    } catch (e) {
+      validationBanner.classList.remove('hidden','good');
+      validationBanner.classList.add('bad');
+      validationBanner.innerHTML=`<strong>Could not discard ${esc(label)}.</strong> ${esc(e.message || e)}`;
+      button.disabled=false;
+      button.textContent=original;
+    }
+  }
+
+  function normalizePhoneField(i, field, isHelper=false) {
+    const r=rows[i];
+    if (!r) return;
+    const formatted=formatUsPhone(r[field]);
+    r[field]=formatted;
+    if (['CELL','REFPHONE1','REFPHONE2','_secondary_phone'].includes(field)) applyPhoneRule(i,false);
+  }
+
   function bindCardEvents() {
     document.querySelectorAll('.card-tab').forEach(btn=>btn.addEventListener('click',()=>{
       activeTabs[+btn.dataset.i]=btn.dataset.tab; render();
@@ -544,6 +603,9 @@
     }));
     document.querySelectorAll('input[data-field="MODEL1"]').forEach(el=>el.addEventListener('change',e=>{
       const i=+e.target.dataset.i; if (boolish(rows[i]._used_building)) { applyUsedBuilding(i,true,false); render(); }
+    }));
+    document.querySelectorAll('input[data-field="CELL"], input[data-field="PHONE5"], input[data-field="REFPHONE1"], input[data-field="REFPHONE2"]').forEach(el=>el.addEventListener('change',e=>{
+      const i=+e.target.dataset.i; normalizePhoneField(i,e.target.dataset.field,false); render();
     }));
     document.querySelectorAll('.used-building-toggle').forEach(el=>el.addEventListener('change',e=>{
       const i=+e.target.dataset.i; applyUsedBuilding(i,e.target.checked,true); render();
@@ -562,10 +624,16 @@
         const i=+e.target.dataset.i; setUsedSuffix(i,e.target.value); render();
       });
     });
-    document.querySelectorAll('input[data-helper]').forEach(el=>el.addEventListener('input',e=>{
-      const i=+e.target.dataset.i; rows[i][e.target.dataset.helper]=e.target.value;
-      if (e.target.dataset.helper==='_secondary_phone') applyPhoneRule(i,false);
-    }));
+    document.querySelectorAll('input[data-helper]').forEach(el=>{
+      el.addEventListener('input',e=>{
+        const i=+e.target.dataset.i; rows[i][e.target.dataset.helper]=e.target.value;
+        if (e.target.dataset.helper==='_secondary_phone') applyPhoneRule(i,false);
+      });
+      el.addEventListener('change',e=>{
+        const i=+e.target.dataset.i;
+        if (e.target.dataset.helper==='_secondary_phone') { normalizePhoneField(i,'_secondary_phone',true); render(); }
+      });
+    });
     document.querySelectorAll('.store-select').forEach(el=>el.addEventListener('change',e=>{
       const i=+e.target.dataset.i; rows[i].STORE=e.target.value; rows[i]._store_title=findStoreTitle(e.target.value); remapDealerForStore(i);
       const z=zones.find(z=>zoneStore(z)===clean(rows[i].STORE) && norm(zoneSelector(z))===norm(rows[i]._zone_selector));
@@ -589,6 +657,7 @@
     document.querySelectorAll('.copy-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].CONTRACT=rows[i].MODEL1; render(); }));
     document.querySelectorAll('.all-btn').forEach(btn=>btn.addEventListener('click',()=>openAllFields(+btn.dataset.i)));
     document.querySelectorAll('.source-btn').forEach(btn=>btn.addEventListener('click',()=>openSource(+btn.dataset.i)));
+    document.querySelectorAll('.discard-btn').forEach(btn=>btn.addEventListener('click',()=>discardContract(+btn.dataset.i,btn)));
   }
 
   function validate(show=true) {

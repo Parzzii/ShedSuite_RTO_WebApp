@@ -125,7 +125,16 @@ def digits(v: Any) -> str:
 
 
 def phone(v: Any) -> str:
+    """Normalize US phone numbers to ###-###-####.
+
+    ShedSuite occasionally exports an 11-digit US number with the leading
+    country code 1.  RTO Pro still needs the same 10-digit local number, so
+    ignore that leading 1 before formatting and before the phone comparison
+    rule runs.  Other non-10-digit values are left untouched.
+    """
     d = digits(v)
+    if len(d) == 11 and d.startswith('1'):
+        d = d[1:]
     if len(d) == 10:
         return f'{d[:3]}-{d[3:6]}-{d[6:]}'
     return clean_text(v)

@@ -181,3 +181,8 @@ html[data-theme="cyberpunk"] a{color:var(--neon-cyan)}html[data-theme="cyberpunk
 
 @media(max-width:600px){.theme-toggle{right:12px;bottom:12px}.theme-toggle span:last-child{display:none}.theme-toggle{width:40px;height:40px;padding:0}}
 @media(prefers-reduced-motion:reduce){.theme-toggle,.cyber-toast{transition:none}html[data-theme="cyberpunk"] body::after{display:none}}
+
+/* V6.3.6 discard control --------------------------------------------------- */
+.mini-btn.discard-btn{background:#fff1f0;color:#a8241a;border-color:#f2bbb6}.mini-btn.discard-btn:hover{background:#ffe3e0;border-color:#e8958e;color:#8c1d15}.mini-btn.discard-btn:disabled{opacity:.65;cursor:wait}
+html[data-theme="dark"] .mini-btn.discard-btn{background:#351d20;color:#ffaaa2;border-color:#6d3438}html[data-theme="dark"] .mini-btn.discard-btn:hover{background:#482328;color:#ffc1bb;border-color:#985057}
+html[data-theme="cyberpunk"] .mini-btn.discard-btn{background:linear-gradient(105deg,rgba(255,35,76,.16),rgba(255,122,24,.12));color:#ff5a78;border-color:#ff314f;box-shadow:0 0 9px rgba(255,49,79,.18)}html[data-theme="cyberpunk"] .mini-btn.discard-btn:hover{color:#ffe34d;border-color:#ff7a18;box-shadow:0 0 11px rgba(255,49,79,.28),0 0 15px rgba(255,122,24,.20)}

@@ -1,8 +1,8 @@
-# ShedSuite → RTO Pro Web App V6.3.5
+# ShedSuite → RTO Pro Web App V6.3.6
 
-V6.3.5 fixes theme contrast in the RTO Pro Workflow / Combined PDFs panels and expands the hidden Cyberpunk palette with neon pink, red, orange, yellow, cyan, and blue accents.
+V6.3.6 adds immediate per-contract Discard on the review screen and normalizes 11-digit US phone numbers beginning with country code 1 before applying the existing phone comparison rule. It also retains the V6.3.5 theme fixes and expanded hidden Cyberpunk palette.
 
-V6.3.5 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+V6.3.6 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
 
 ## V3 review workflow
 
@@ -110,7 +110,13 @@ V6.3.1 - Editable Used-Building Suffix
 The Used Building suffix control is now a free-text field. The app still auto-suggests `U`, then `A`, `B`, `C`, etc., but you can type your own alphanumeric suffix manually. The model number remains unchanged, and the resulting contract must be unique and no more than 10 characters total.
 
 
-## V6.3.5 brand/vendor normalization
+
+## V6.3.6 discard + phone normalization
+
+- Each review card has a red **Discard** button. After confirmation, that contract is immediately removed from the current job, its combined PDF is removed, and the RTO CSV/XML/ZIP are rebuilt. Nothing is deleted from ShedSuite itself.
+- US phone numbers exported as 11 digits with a leading country code `1` are normalized to the existing `###-###-####` format. The same Primary / Secondary / Ref 1 / Ref 2 comparison rule then runs on the normalized 10 digits.
+
+## V6.3.3 brand/vendor normalization
 
 ShedSuite company-name variations are normalized for RTO Pro BRAND1 and VENDOR1.
 The canonical values are ALPINE, 4 SEASONS, GENESIS, SMART SHED, WESTWOOD SHEDS,
@@ -120,10 +126,10 @@ and Four Seasons are accepted automatically. Unknown brands keep their original
 upper-cased value.
 
 
-## V6.3.5 themes
+## V6.3.4–V6.3.5 themes
 
 - Added a persistent normal Dark Mode with a visible Light/Dark toggle.
 - Added a hidden Cyberpunk easter-egg theme. It is intentionally absent from the normal theme control.
-- Secret activation: press `Alt + Shift + K` anywhere, or click the V6.3.5 version label five times quickly on the landing page.
+- Secret activation: press `Alt + Shift + K` anywhere, or click the V6.3.6 version label five times quickly on the landing page.
 - The selected theme is stored only in the browser (`localStorage`) and follows you across app pages.
 - Clicking the normal theme button while Cyberpunk is active returns to normal Dark Mode.
