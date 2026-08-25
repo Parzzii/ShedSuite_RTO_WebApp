@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 echo.
 echo ================================================
-echo   ShedSuite - RTO Pro Web App V7.1
+echo   ShedSuite - RTO Pro Web App V7.2
 echo   V3 base + RTO Pro upload + Delivery Certificate
 echo ================================================
 echo.

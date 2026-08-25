@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V7.1
+ShedSuite RTO Web App V7.2
 ========================
 
 Base: V3.0.0
@@ -76,7 +76,7 @@ V6.3.4/6.3.5 - Themes
 
 
 
-V7.1 - Multiple CSV Input
+V7.2 - Multiple CSV Input
 -------------------------
 - Select one or multiple ShedSuite RTO contracts CSVs on the first page.
 - All selected CSVs merge into one review session.
@@ -96,3 +96,11 @@ V7 - Background Delivery Certificates
 Delivery Certificate Chromium now runs headlessly in a background worker.
 You can review, edit, discard, and save contracts while certificates download.
 The review page shows live progress and supports Retry/Skip for certificate jobs.
+
+
+V7.2 - Live Coordinate Refresh
+------------------------------
+- Delivery Certificate coordinates are extracted as each background download finishes.
+- The open review page updates automatically without a page reload.
+- Coordinates are added to Directions without deleting existing user text.
+- Background coordinate metadata is protected from stale browser saves.

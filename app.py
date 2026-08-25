@@ -1782,6 +1782,24 @@ def _initialize_certificate_status(jp: Path, rows: list[dict], active: bool) -> 
     })
 
 
+def _extract_ready_certificate_fields(jp: Path, row: dict) -> dict[str, str]:
+    """Re-extract PDF fields after the Delivery Certificate has been appended.
+
+    V7.1 extracted coordinates before Chromium added the Delivery Certificate,
+    which meant the review page could stay blank even though the final PDF had
+    coordinates. V7.2 calls this immediately when each certificate is ready.
+    """
+    oid = str(row.get('_source_order_id', '') or '').strip()
+    target = jp / 'Combined_Files' / f"{safe_filename(row.get('_pdf_name') or row.get('NAME') or oid)}.pdf"
+    if not target.exists():
+        return {}
+    try:
+        return extract_pdf_fields(target)
+    except Exception as exc:
+        print(f'Could not refresh PDF fields for {oid or row.get("NAME", "contract")}: {exc}')
+        return {}
+
+
 def _merge_certificate_results(job: str, worker_rows: list[dict], cert_warnings: list[str]) -> None:
     jp = job_path(job)
     with _job_lock(job):
@@ -1807,6 +1825,27 @@ def _merge_certificate_results(job: str, worker_rows: list[dict], cert_warnings:
                 r['_pdf_manifest'] = manifest
                 target = jp / 'Combined_Files' / f"{safe_filename(r.get('_pdf_name') or r.get('NAME') or oid)}.pdf"
                 r['_pdf_available'] = target.exists()
+
+                # V7.2: Delivery Certificate often contains the coordinates.
+                # Re-extract after it is appended and merge those server-owned
+                # fields into the latest row without touching the user's other edits.
+                fields = _extract_ready_certificate_fields(jp, wr)
+                coord_map = {
+                    '_pdf_coordinates': 'coordinates',
+                    '_pdf_latitude': 'latitude',
+                    '_pdf_longitude': 'longitude',
+                }
+                for meta_key, field_key in coord_map.items():
+                    value = str(fields.get(field_key, '') or '').strip()
+                    if value:
+                        r[meta_key] = value
+                        wr[meta_key] = value
+                coords = str(fields.get('coordinates', '') or '').strip()
+                if coords:
+                    existing_direction = str(r.get('DIRECTIONS', '') or '')
+                    if coords not in existing_direction:
+                        r['DIRECTIONS'] = coords + (('      ' + existing_direction) if existing_direction else '')
+
                 if target.exists():
                     try:
                         doc = fitz.open(target)
@@ -1874,6 +1913,18 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
                 return False
 
         def progress(oid: str, state: str, detail: str, row: dict) -> None:
+            # When the certificate is ready, it has already been appended to the
+            # combined PDF by delivery_certificate.py. Extract coordinates now so
+            # the browser can receive them while the remaining certificates run.
+            fields = _extract_ready_certificate_fields(jp, row) if state == 'ready' else {}
+            coords = str(fields.get('coordinates', '') or '').strip()
+            latitude = str(fields.get('latitude', '') or '').strip()
+            longitude = str(fields.get('longitude', '') or '').strip()
+            if coords:
+                row['_pdf_coordinates'] = coords
+                row['_pdf_latitude'] = latitude
+                row['_pdf_longitude'] = longitude
+
             with _job_lock(job):
                 st = _read_certificate_status(jp)
                 st.setdefault('items', {})
@@ -1881,12 +1932,38 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
                 # A discard/skip made in the UI wins over a late browser result.
                 if existing_state in {'discarded', 'skipped'}:
                     return
+
+                # Persist the fresh PDF metadata into the latest row immediately.
+                # This makes refreshes safe even before the whole Chromium batch ends.
+                if coords and (jp / 'rows.json').exists():
+                    try:
+                        latest_rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+                        latest = next((x for x in latest_rows if str(x.get('_source_order_id', '') or '').strip() == oid), None)
+                        if latest is not None:
+                            latest['_pdf_coordinates'] = coords
+                            latest['_pdf_latitude'] = latitude
+                            latest['_pdf_longitude'] = longitude
+                            existing_direction = str(latest.get('DIRECTIONS', '') or '')
+                            if coords not in existing_direction:
+                                latest['DIRECTIONS'] = coords + (('      ' + existing_direction) if existing_direction else '')
+                            temp_rows = (jp / 'rows.json').with_suffix('.tmp')
+                            temp_rows.write_text(json.dumps(latest_rows, indent=2), encoding='utf-8')
+                            temp_rows.replace(jp / 'rows.json')
+                    except Exception as exc:
+                        print(f'Could not persist live coordinates for {oid}: {exc}')
+
                 st['active'] = True
                 st['complete'] = False
+                status_detail = str(detail or '')
+                if coords and state == 'ready':
+                    status_detail = (status_detail + ' Coordinates extracted automatically.').strip()
                 st['items'][oid] = {
                     'status': state,
                     'name': str(row.get('NAME', '') or oid),
-                    'detail': str(detail or ''),
+                    'detail': status_detail,
+                    'coordinates': coords,
+                    'latitude': latitude,
+                    'longitude': longitude,
                 }
                 _write_certificate_status(jp, st)
 
@@ -2319,6 +2396,19 @@ def save(job):
             )
         )
 
+    # V7.2: the certificate worker may have updated PDF metadata between the
+    # beginning of this POST and the moment we merge the browser payload. Read
+    # the freshest server rows once more so those background updates win.
+    with _job_lock(job):
+        try:
+            latest_server_rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+            old_ids = [str(x.get('_source_order_id', '') or '').strip() for x in old_rows]
+            latest_ids = [str(x.get('_source_order_id', '') or '').strip() for x in latest_server_rows]
+            if len(latest_server_rows) == len(old_rows) and latest_ids == old_ids:
+                old_rows = latest_server_rows
+        except Exception:
+            pass
+
     metadata = [
         k
         for k in old_rows[0].keys()
@@ -2343,6 +2433,10 @@ def save(job):
             '_delivery_certificate', '_delivery_certificate_method',
             '_delivery_certificate_name', '_pdf_manifest', '_pdf_available',
             '_pdf_pages',
+            # V7.2: these can arrive from the background certificate worker
+            # after the review page was opened, so stale browser JSON must not
+            # be allowed to wipe them out.
+            '_pdf_coordinates', '_pdf_latitude', '_pdf_longitude',
         }
         for k in metadata:
             # These fields may change in the background after the browser loaded
@@ -2354,6 +2448,15 @@ def save(job):
                     k,
                     old.get(k, ''),
                 )
+
+        # V7.2: if coordinates arrived while this review page was open, preserve
+        # them in DIRECTIONS even when the browser submitted an older copy of
+        # the row. This never removes or replaces user-entered directions.
+        live_coords = str(old.get('_pdf_coordinates', '') or '').strip()
+        if live_coords:
+            directions = str(r.get('DIRECTIONS', '') or '')
+            if live_coords not in directions:
+                r['DIRECTIONS'] = live_coords + (('      ' + directions) if directions else '')
 
         # Keep the same phone normalization on manually edited values as on
         # the original CSV transform. A leading US country code (1) is ignored.

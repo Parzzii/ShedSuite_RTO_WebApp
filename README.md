@@ -1,10 +1,18 @@
-# ShedSuite → RTO Pro Web App V7.1
+
+## V7.2 live Delivery Certificate coordinates
+
+- Coordinates are re-extracted immediately after each background Delivery Certificate is appended.
+- The open review page receives the coordinates through the existing background status polling; no refresh is required.
+- Coordinates are automatically added to Directions while preserving any text already typed there.
+- Coordinate metadata is server-owned so a stale Save All from an already-open review page cannot erase a coordinate that arrived in the background.
+
+# ShedSuite → RTO Pro Web App V7.2
 
 V7 adds immediate per-contract Discard on the review screen and normalizes 11-digit US phone numbers beginning with country code 1 before applying the existing phone comparison rule. It also retains the V6.3.5 theme fixes and expanded hidden Cyberpunk palette.
 
 V7 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
 
-## V7.1 multiple CSV import
+## V7.2 multiple CSV import
 
 - The import screen accepts **multiple ShedSuite RTO contracts CSV files at once**.
 - All selected reports are merged into one review/edit session before the existing V7 workflow runs.

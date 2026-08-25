@@ -443,9 +443,68 @@
     } catch(e) { alert(`Could not skip certificate: ${e.message || e}`); }
   }
 
+  function putCoordinatesIntoDirections(i, coords) {
+    coords=clean(coords);
+    if (!coords || i<0 || i>=rows.length) return;
+    const textarea=document.querySelector(`textarea[data-i="${i}"][data-field="DIRECTIONS"]`);
+    const current=textarea ? String(textarea.value || '') : String(rows[i].DIRECTIONS || '');
+    if (current.includes(coords)) {
+      rows[i].DIRECTIONS=current;
+      return;
+    }
+    const prefix=coords + (current ? '      ' : '');
+    const next=prefix + current;
+    rows[i].DIRECTIONS=next;
+    if (textarea) {
+      const focused=document.activeElement===textarea;
+      const start=focused && Number.isFinite(textarea.selectionStart) ? textarea.selectionStart : null;
+      const end=focused && Number.isFinite(textarea.selectionEnd) ? textarea.selectionEnd : null;
+      textarea.value=next;
+      // If the user happened to be typing Directions when coordinates arrived,
+      // keep the caret around the same user text instead of jumping to the top.
+      if (focused && start!==null && end!==null) {
+        const offset=prefix.length;
+        try { textarea.setSelectionRange(start+offset,end+offset); } catch(e) {}
+      }
+    }
+  }
+
+  function syncCoordinatesFromDeliveryStatus() {
+    const items=deliveryStatus.items || {};
+    Object.entries(items).forEach(([oid,item])=>{
+      const coords=clean(item?.coordinates);
+      if (!coords) return;
+      const i=rows.findIndex(r=>clean(r._source_order_id)===clean(oid));
+      if (i<0) return;
+      rows[i]._pdf_coordinates=coords;
+      rows[i]._pdf_latitude=clean(item?.latitude);
+      rows[i]._pdf_longitude=clean(item?.longitude);
+      putCoordinatesIntoDirections(i,coords);
+
+      // Update only the coordinates strip in the visible PDF tab. Do not
+      // re-render the card, because re-rendering could disturb unsaved edits.
+      document.querySelectorAll('[data-pdf-coordinates]').forEach(box=>{
+        if (clean(box.dataset.pdfCoordinates)!==clean(oid)) return;
+        const strong=box.querySelector('strong');
+        if (strong) strong.textContent=coords;
+        let btn=box.querySelector('.copy-coordinates');
+        if (!btn) {
+          btn=document.createElement('button');
+          btn.type='button';
+          btn.className='mini-btn copy-coordinates';
+          btn.dataset.i=String(i);
+          btn.textContent='Put in Directions';
+          btn.addEventListener('click',()=>putCoordinatesIntoDirections(i,coords));
+          box.appendChild(btn);
+        }
+      });
+    });
+  }
+
   function updateDeliveryProgress() {
     const box=document.getElementById('deliveryProgress');
     if (!box) return;
+    syncCoordinatesFromDeliveryStatus();
     const c=deliveryStatus.counts || {};
     const total=Number(deliveryStatus.total || 0);
     if (!total && !deliveryStatus.active) { box.classList.add('hidden'); return; }
@@ -493,7 +552,7 @@
     const pdfLink=r._pdf_available ? `<a class="button ghost" target="_blank" href="/pdf/${encodeURIComponent(window.RTO_JOB)}/${i}">Open combined PDF</a>` : '<span class="mini-muted">No PDF loaded</span>';
     return `<div class="tab-section">
       <div class="pdf-summary">
-        <div class="pdf-coordinates"><span>Coordinates extracted from PDF</span><strong>${esc(r._pdf_coordinates || 'Coordinates not found')}</strong>${r._pdf_coordinates?`<button type="button" class="mini-btn copy-coordinates" data-i="${i}">Put in Directions</button>`:''}</div>
+        <div class="pdf-coordinates" data-pdf-coordinates="${esc(r._source_order_id)}"><span>Coordinates extracted from PDF</span><strong>${esc(r._pdf_coordinates || 'Coordinates not found')}</strong>${r._pdf_coordinates?`<button type="button" class="mini-btn copy-coordinates" data-i="${i}">Put in Directions</button>`:''}</div>
         <div class="pdf-actions">${pdfLink}</div>
       </div>
       ${certActions(r,i)}
@@ -748,8 +807,8 @@
     document.querySelectorAll('.auto-phone').forEach(btn=>btn.addEventListener('click',()=>{ applyPhoneRule(+btn.dataset.i,true); render(); }));
     document.querySelectorAll('.redetect-tax').forEach(btn=>btn.addEventListener('click',()=>redetectTax(+btn.dataset.i,btn)));
     document.querySelectorAll('.copy-coordinates').forEach(btn=>btn.addEventListener('click',()=>{
-      const i=+btn.dataset.i; const c=clean(rows[i]._pdf_coordinates); const d=clean(rows[i].DIRECTIONS);
-      if (c && !d.includes(c)) rows[i].DIRECTIONS=c+(d?`      ${d}`:''); render();
+      const i=+btn.dataset.i;
+      putCoordinatesIntoDirections(i,clean(rows[i]._pdf_coordinates));
     }));
     document.querySelectorAll('.suggestion').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; setField(i,btn.dataset.field,btn.dataset.value,false); if (btn.dataset.field==='MODEL1' && boolish(rows[i]._used_building)) applyUsedBuilding(i,true,false); render(); }));
     document.querySelectorAll('.copy-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].CONTRACT=rows[i].MODEL1; render(); }));
