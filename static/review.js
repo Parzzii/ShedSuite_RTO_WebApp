@@ -292,7 +292,7 @@
         ${inputField(i,'CATEGORY1','Category',{emphasis:true})}
         ${textareaField(i,'DESCRIPTION1','Description',{rows:2})}
       </div>
-      <div class="source-hint">ShedSuite model variation: <strong>${esc(r._source_model_variation || '—')}</strong></div>
+      <div class="source-hint">Source model / style: <strong>${esc(r._source_model_variation || '—')}</strong></div>
       <div class="mapping-grid inventory-grid">
         ${inputField(i,'MODEL1','Model #')}
         ${inputField(i,'SERIAL1','Serial #')}
@@ -582,10 +582,10 @@
     const warningHtml=Array.isArray(r._warnings) && r._warnings.length ? `<details class="row-warnings"><summary>${r._warnings.length} original check${r._warnings.length===1?'':'s'}</summary>${r._warnings.map(x=>`<div>${esc(x)}</div>`).join('')}</details>` : '';
     return `<article class="contract-card ${needs?'needs-review':'ready'}" data-index="${i}">
       <header class="contract-header">
-        <div class="contract-identity"><span class="status-dot"></span><div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>Order <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span></div></div></div>
+        <div class="contract-identity"><span class="status-dot"></span><div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>${clean(r._source_type)==='pdf'?'Agreement':'Order'} <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span><span class="source-type-badge ${clean(r._source_type)==='pdf'?'pdf':'csv'}">${clean(r._source_type)==='pdf'?'PDF':'CSV'}</span></div></div></div>
         <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}${certChip(r)}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button><button type="button" class="mini-btn discard-btn" data-i="${i}" title="Remove this contract from the current import">Discard</button></div>
       </header>
-      <div class="source-strip"><span class="source-label">ShedSuite dealer</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
+      <div class="source-strip"><span class="source-label">${clean(r._source_type)==='pdf'?'PDF dealer':'ShedSuite dealer'}</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
       <nav class="card-tabs" aria-label="Contract sections">
         ${[['mapping','Mapping'],['inventory','Inventory'],['customer','Customer'],['tax','Tax & Address'],['pdf','PDF / Agent']].map(([v,l])=>`<button type="button" class="card-tab ${tab===v?'active':''}" data-i="${i}" data-tab="${v}">${l}</button>`).join('')}
       </nav>
@@ -864,7 +864,7 @@
 
   function openSource(i) {
     const src=sources[i] || {};
-    document.getElementById('sourceTitle').textContent=`${rows[i].NAME} · ShedSuite source`;
+    document.getElementById('sourceTitle').textContent=`${rows[i].NAME} · ${clean(rows[i]._source_type)==='pdf'?'PDF source':'ShedSuite source'}`;
     sourceGrid.innerHTML=Object.entries(src).map(([k,v])=>`<div><span>${esc(k)}</span><strong>${esc(v || '—')}</strong></div>`).join('');
     sourceDialog.showModal();
   }

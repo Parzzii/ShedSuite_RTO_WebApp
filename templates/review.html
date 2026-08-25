@@ -13,7 +13,7 @@
       <div>
         <a class="backlink" href="{{ url_for('index') }}">← New import</a>
         <strong>{{rows|length}} contracts</strong>
-        {% if input_summary and input_summary.file_count %}<span class="db-pill good">{{input_summary.file_count}} CSV{{'' if input_summary.file_count == 1 else 's'}} merged{% if input_summary.duplicates_skipped %} · {{input_summary.duplicates_skipped}} duplicate{{'' if input_summary.duplicates_skipped == 1 else 's'}} skipped{% endif %}</span>{% endif %}
+        {% if input_summary and input_summary.file_count %}<span class="db-pill good">{{input_summary.file_count}} file{{'' if input_summary.file_count == 1 else 's'}} merged{% if input_summary.csv_count %} · {{input_summary.csv_count}} CSV{{'' if input_summary.csv_count == 1 else 's'}}{% endif %}{% if input_summary.pdf_count %} · {{input_summary.pdf_count}} PDF{{'' if input_summary.pdf_count == 1 else 's'}}{% endif %}{% if input_summary.duplicates_skipped %} · {{input_summary.duplicates_skipped}} duplicate{{'' if input_summary.duplicates_skipped == 1 else 's'}} skipped{% endif %}</span>{% endif %}
         <span class="db-pill {{'good' if refs.connected else 'bad'}}">Firebird {{'connected' if refs.connected else 'not connected'}}</span>
       </div>
       <div class="sticky-actions">
@@ -84,7 +84,7 @@
 
   <dialog id="sourceDialog" class="field-dialog source-dialog">
     <form method="dialog" class="dialog-frame">
-      <header><div><div class="eyebrow">ORIGINAL SHEDSUITE ROW</div><h2 id="sourceTitle">Source details</h2></div><button class="icon-btn" value="cancel">×</button></header>
+      <header><div><div class="eyebrow">ORIGINAL SOURCE DATA</div><h2 id="sourceTitle">Source details</h2></div><button class="icon-btn" value="cancel">×</button></header>
       <div id="sourceGrid" class="source-grid"></div>
       <footer><button class="secondary">Close</button></footer>
     </form>

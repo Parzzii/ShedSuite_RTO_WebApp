@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
-  <title>ShedSuite → RTO Pro V7.5</title>
+  <title>ShedSuite → RTO Pro V7.6</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="landing">
@@ -12,8 +12,8 @@
     <header class="topbrand">
       <div>
         <div class="eyebrow">LOCAL RTO IMPORT TOOL</div>
-        <h1>ShedSuite → RTO Pro <span class="version-mark" style="font-size:.55em;opacity:.7">V7.5</span></h1>
-        <p class="lede">Choose what you are entering today. Contracts keep the full V7.2 ShedSuite workflow; Inventory opens a focused receiving screen with automatic model-number suggestions.</p>
+        <h1>ShedSuite → RTO Pro <span class="version-mark" style="font-size:.55em;opacity:.7">V7.6</span></h1>
+        <p class="lede">Choose what you are entering today. Contracts can now take ShedSuite CSVs and supported RentaBarn-style contract PDFs together; Inventory keeps the focused receiving screen with automatic model-number suggestions.</p>
       </div>
     </header>
 
@@ -24,7 +24,7 @@
     <section class="mode-picker" aria-label="Choose workflow">
       <button type="button" class="mode-card" data-mode="contracts">
         <span class="mode-icon">C</span>
-        <span><strong>Contracts</strong><small>Upload one or more ShedSuite CSVs, review contracts, download PDFs, and import to RTO Pro.</small></span>
+        <span><strong>Contracts</strong><small>Upload ShedSuite CSVs and/or contract PDFs, review everything together, and import to RTO Pro.</small></span>
       </button>
       <button type="button" class="mode-card" data-mode="inventory">
         <span class="mode-icon">I</span>
@@ -42,23 +42,23 @@
         <section>
           <div class="section-number">1</div>
           <div class="section-body">
-            <h2>ShedSuite contracts reports</h2>
-            <p class="muted">Select <strong>one or multiple RTO contracts report CSVs</strong>. V7.5 combines them into one review session and skips overlapping Customer Order IDs automatically.</p>
-            <label class="file-drop" id="csvFileDrop">
-              <span id="csvFilePrompt">Choose one or more CSVs</span>
-              <small id="csvFileSummary" class="file-summary">You can select several reports at the same time.</small>
-              <input type="file" id="csvFiles" name="csv_files" accept=".csv,text/csv" multiple required>
+            <h2>Contract files</h2>
+            <p class="muted">Select <strong>one or multiple ShedSuite CSVs and/or supported RentaBarn-style contract PDFs</strong>. V7.6 converts both sources into one review session and skips duplicate Customer Order / Agreement numbers automatically.</p>
+            <label class="file-drop" id="contractFileDrop">
+              <span id="contractFilePrompt">Choose CSVs and/or PDFs</span>
+              <small id="contractFileSummary" class="file-summary">Multiple CSV and PDF files can be mixed in one batch.</small>
+              <input type="file" id="contractFiles" name="contract_files" accept=".csv,.pdf,text/csv,application/pdf" multiple required>
             </label>
             <div class="two-col compact-top">
-              <label>PDF collection
+              <label>ShedSuite PDF collection
                 <select name="pdf_mode">
                   <option value="contract">Invoice + signed contract</option>
                   <option value="all">Invoice + contract + available attachments</option>
                 </select>
               </label>
-              <label class="checkbox-card"><input type="checkbox" name="download_pdfs" value="yes" checked><span><strong>Download PDFs now</strong><small>Direct PDFs load first; Delivery Certificates continue in background Chromium.</small></span></label>
+              <label class="checkbox-card"><input type="checkbox" name="download_pdfs" value="yes" checked><span><strong>Download ShedSuite PDFs</strong><small>CSV rows load direct PDFs first; Delivery Certificates continue in background Chromium. Uploaded contract PDFs are already included.</small></span></label>
             </div>
-            <div class="info-line"><strong>ZipTax:</strong> automatic tax-zone detection runs from the delivery address during import. You can re-run it and override the selected RTO tax zone later on each contract.</div>
+            <div class="info-line"><strong>PDF import:</strong> Digital/text-based RentaBarn-style contract PDFs are read directly; the uploaded PDF becomes that contract's combined source PDF. Scanned-image PDFs should be re-downloaded as the original digital PDF.<br><strong>ZipTax:</strong> automatic tax-zone detection runs from the delivery address during import. You can re-run it and override the selected RTO tax zone later on each contract.</div>
           </div>
         </section>
       </div>
@@ -90,7 +90,7 @@
         <div class="section-number">1</div>
         <div class="section-body">
           <h2>Inventory-only receiving</h2>
-          <p class="muted">Open a clean inventory entry page. There you can add as many buildings as you need, choose the company/model series, and V7.5 will suggest the latest next model from RTO Pro.</p>
+          <p class="muted">Open a clean inventory entry page. There you can add as many buildings as you need, choose the company/model series, and V7.6 will suggest the latest next model from RTO Pro.</p>
           <div class="inventory-mode-callout">
             <strong>No ShedSuite CSV required.</strong>
             <span>Model and Serial are the core inventory identifiers. Company selection also fills your normal Brand, Vendor, Store and Agent defaults.</span>
@@ -146,19 +146,24 @@
       document.querySelectorAll('#contractsMode .landing-tab-panel').forEach(x => x.classList.toggle('active', x.dataset.panel === tab));
     }));
 
-    const csvFiles = document.getElementById('csvFiles');
-    const csvPrompt = document.getElementById('csvFilePrompt');
-    const csvSummary = document.getElementById('csvFileSummary');
-    if (csvFiles) csvFiles.addEventListener('change', () => {
-      const files = Array.from(csvFiles.files || []);
+    const contractFiles = document.getElementById('contractFiles');
+    const contractPrompt = document.getElementById('contractFilePrompt');
+    const contractSummary = document.getElementById('contractFileSummary');
+    if (contractFiles) contractFiles.addEventListener('change', () => {
+      const files = Array.from(contractFiles.files || []);
       if (!files.length) {
-        csvPrompt.textContent = 'Choose one or more CSVs';
-        csvSummary.textContent = 'You can select several reports at the same time.';
+        contractPrompt.textContent = 'Choose CSVs and/or PDFs';
+        contractSummary.textContent = 'Multiple CSV and PDF files can be mixed in one batch.';
         return;
       }
-      csvPrompt.textContent = files.length === 1 ? '1 CSV selected' : `${files.length} CSVs selected`;
+      const csvCount = files.filter(f => /\.csv$/i.test(f.name)).length;
+      const pdfCount = files.filter(f => /\.pdf$/i.test(f.name)).length;
+      const parts = [];
+      if (csvCount) parts.push(`${csvCount} CSV${csvCount===1?'':'s'}`);
+      if (pdfCount) parts.push(`${pdfCount} PDF${pdfCount===1?'':'s'}`);
+      contractPrompt.textContent = `${files.length} file${files.length===1?'':'s'} selected · ${parts.join(' + ')}`;
       const names = files.map(f => f.name);
-      csvSummary.textContent = names.length <= 3 ? names.join(' • ') : `${names.slice(0,3).join(' • ')} • +${names.length-3} more`;
+      contractSummary.textContent = names.length <= 3 ? names.join(' • ') : `${names.slice(0,3).join(' • ')} • +${names.length-3} more`;
     });
 
     const requested = new URLSearchParams(location.search).get('mode');

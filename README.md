@@ -173,3 +173,7 @@ The landing page now asks which workflow to use:
 Inventory-only rows support Model, Serial, Stock, Date Received, Category, Description, Brand, Vendor, Agent, Invoice, Cost, Retail, RTO price, Rental/Retail, Quantity and BOR. Model + Serial are the RTO Pro inventory receiver's core required identifiers; V7.5 also requires Company and Store to protect this Central Server workflow from ambiguous entries.
 
 The inventory CSV uses RTO Pro's inventory-receive field names and launches RTO Pro with the inventory receiver (`-r`) instead of the customer/contract importer (`-importcust`). The downloadable file is `InventoryImport.csv`.
+
+## V7.6 — CSV + contract PDF intake
+
+Contracts can now be created from any mix of ShedSuite RTO report CSVs and supported digital RentaBarn-style contract PDFs. PDF values are converted into the same internal source schema and continue through the existing transform/review/RTO export pipeline. The uploaded PDF becomes that contract's combined packet, while only ShedSuite CSV rows participate in the background Delivery Certificate Chromium worker. A PDF marked USED also feeds the existing used-building suffix workflow automatically.

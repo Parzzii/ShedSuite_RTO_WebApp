@@ -217,3 +217,12 @@ html[data-theme="cyberpunk"] .mode-card{background:linear-gradient(145deg,rgba(7
 
 @media(max-width:950px){.mode-picker{grid-template-columns:1fr}.inventory-guide{grid-template-columns:1fr}.inventory-company-row{grid-template-columns:1fr 1fr}.inventory-company{grid-column:1/-1}.inventory-required-grid{grid-template-columns:repeat(2,1fr)}.inventory-details-grid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:650px){.inventory-head{align-items:flex-start;flex-direction:column}.inventory-company-row,.inventory-required-grid,.inventory-details-grid{grid-template-columns:1fr}.inventory-company{grid-column:auto}.inventory-entry-head{align-items:flex-start;flex-direction:column}.inventory-entry-actions{width:100%;justify-content:space-between}.split-actions{gap:10px;flex-wrap:wrap}}
+
+/* V7.6 mixed contract intake source badge */
+.source-type-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:.05em;border:1px solid currentColor}
+.source-type-badge.csv{color:#2563eb;background:rgba(37,99,235,.08)}
+.source-type-badge.pdf{color:#dc2626;background:rgba(220,38,38,.08)}
+html[data-theme="dark"] .source-type-badge.csv{color:#93c5fd;background:rgba(59,130,246,.14)}
+html[data-theme="dark"] .source-type-badge.pdf{color:#fca5a5;background:rgba(239,68,68,.14)}
+html[data-theme="cyberpunk"] .source-type-badge.csv{color:#38bdf8;background:rgba(14,165,233,.12);box-shadow:0 0 12px rgba(14,165,233,.22)}
+html[data-theme="cyberpunk"] .source-type-badge.pdf{color:#ff3b81;background:rgba(255,59,129,.11);box-shadow:0 0 12px rgba(255,59,129,.24)}

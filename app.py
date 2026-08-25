@@ -46,6 +46,7 @@ from rto_transform import (
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
 from delivery_certificate import append_delivery_certificates
+from pdf_contract_import import parse_contract_pdf
 
 
 BASE = Path(__file__).resolve().parent
@@ -216,7 +217,8 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
         if history:
             reasons.append('RTO Pro history: ' + ', '.join(history[:4]))
         if condition_detected:
-            reasons.append('ShedSuite condition: ' + condition)
+            source_label = 'PDF condition' if str(src.get('_import_source_type', '') or '').lower() == 'pdf' else 'ShedSuite condition'
+            reasons.append(source_label + ': ' + condition)
 
         row['_used_detected'] = detected
         row['_used_building'] = detected
@@ -1704,6 +1706,113 @@ def _safe_input_csv_name(filename: str, index: int) -> str:
     return f'{index:02d}_{stem}.csv'
 
 
+def _safe_input_pdf_name(filename: str, index: int) -> str:
+    """Create a stable local PDF filename without trusting the browser path."""
+    original = Path(str(filename or '')).name
+    stem = safe_filename(Path(original).stem or f'contract_{index}')
+    return f'{index:02d}_{stem}.pdf'
+
+
+def merge_contract_inputs(files, jp: Path, required: set[str]) -> tuple[list[dict[str, str]], dict, list[str]]:
+    """Merge ShedSuite CSVs and supported contract PDFs into one source-row list.
+
+    CSV rows remain authoritative if the same Customer Order/Agreement number is
+    supplied twice, because CSV rows contain the ShedSuite document links needed
+    for Delivery Certificates. PDF rows are converted into the same source schema
+    used by rto_transform.py and then enter the normal review/export pipeline.
+    """
+    csv_files = []
+    pdf_files = []
+    unsupported = []
+    for uploaded in files:
+        suffix = Path(str(uploaded.filename or '')).suffix.lower()
+        if suffix == '.csv':
+            csv_files.append(uploaded)
+        elif suffix == '.pdf':
+            pdf_files.append(uploaded)
+        else:
+            unsupported.append(Path(str(uploaded.filename or '')).name or 'unnamed file')
+    if unsupported:
+        raise ValueError('Unsupported file type: ' + ', '.join(unsupported) + '. Choose CSV or PDF files.')
+
+    merged: list[dict[str, str]] = []
+    warnings: list[str] = []
+    summary = {
+        'file_count': len(csv_files) + len(pdf_files),
+        'csv_count': len(csv_files),
+        'pdf_count': len(pdf_files),
+        'row_count': 0,
+        'duplicates_skipped': 0,
+        'files': [],
+    }
+
+    if csv_files:
+        csv_rows, csv_summary, csv_warnings = merge_shedsuite_csv_files(
+            csv_files, jp / 'Input_CSVs', required
+        )
+        for row in csv_rows:
+            row['_import_source_type'] = 'csv'
+        merged.extend(csv_rows)
+        warnings.extend(csv_warnings)
+        summary['duplicates_skipped'] += int(csv_summary.get('duplicates_skipped', 0) or 0)
+        for item in csv_summary.get('files', []):
+            summary['files'].append(dict(item, type='csv'))
+
+    seen = {
+        str(r.get('Customer Order Id', '') or '').strip().casefold():
+        str(r.get('_import_csv_name', '') or r.get('_import_pdf_name', '') or 'another input')
+        for r in merged
+        if str(r.get('Customer Order Id', '') or '').strip()
+    }
+
+    input_pdf_dir = jp / 'Input_PDFs'
+    input_pdf_dir.mkdir(parents=True, exist_ok=True)
+    for index, uploaded in enumerate(pdf_files, 1):
+        original_name = Path(str(uploaded.filename or '')).name or f'contract_{index}.pdf'
+        stored_name = _safe_input_pdf_name(original_name, index)
+        saved_path = input_pdf_dir / stored_name
+        uploaded.save(saved_path)
+        try:
+            row, metadata, pdf_warnings = parse_contract_pdf(saved_path)
+        except Exception as exc:
+            warnings.append(f'{original_name}: PDF skipped ({exc})')
+            summary['files'].append({
+                'name': original_name, 'stored_name': stored_name, 'type': 'pdf',
+                'rows': 0, 'accepted': 0, 'duplicates_skipped': 0,
+                'provider': 'Unrecognized PDF', 'error': str(exc),
+            })
+            continue
+
+        row['_import_source_type'] = 'pdf'
+        row['_import_pdf_name'] = original_name
+        row['_import_pdf_stored_name'] = stored_name
+        order_id = str(row.get('Customer Order Id', '') or '').strip()
+        order_key = order_id.casefold()
+        if order_key and order_key in seen:
+            summary['duplicates_skipped'] += 1
+            warnings.append(
+                f'Duplicate contract/agreement {order_id} in {original_name} was skipped; '
+                f'already loaded from {seen[order_key]}.'
+            )
+            continue
+        if order_key:
+            seen[order_key] = original_name
+        merged.append(row)
+        warnings.extend(pdf_warnings)
+        summary['files'].append({
+            'name': original_name, 'stored_name': stored_name, 'type': 'pdf',
+            'rows': 1, 'accepted': 1, 'duplicates_skipped': 0,
+            'provider': metadata.get('provider', 'Contract PDF'),
+        })
+
+    summary['row_count'] = len(merged)
+    if not merged and pdf_files:
+        pdf_errors = [x for x in warnings if 'PDF skipped' in x]
+        if pdf_errors:
+            raise ValueError(pdf_errors[0])
+    return merged, summary, warnings
+
+
 def merge_shedsuite_csv_files(files, input_dir: Path, required: set[str]) -> tuple[list[dict[str, str]], dict, list[str]]:
     """Save, validate and merge multiple ShedSuite contract-report CSV files.
 
@@ -1902,7 +2011,10 @@ def write_review_csv(rows: list[dict], path: Path):
     fields = [
         'NAME',
         '_source_order_id',
+        '_source_type',
+        '_source_file_name',
         '_source_csv_name',
+        '_source_pdf_name',
         'SERIAL1',
         '_source_company',
         '_source_dealer',
@@ -2023,18 +2135,28 @@ def _write_certificate_status(jp: Path, data: dict) -> None:
 
 def _initialize_certificate_status(jp: Path, rows: list[dict], active: bool) -> None:
     items = {}
+    queued_any = False
     for r in rows:
         oid = str(r.get('_source_order_id', '') or '').strip()
         if not oid:
             continue
+        is_pdf_source = str(r.get('_source_type', '') or '').lower() == 'pdf'
+        should_queue = bool(active and not is_pdf_source)
+        queued_any = queued_any or should_queue
+        if is_pdf_source:
+            detail = 'Uploaded contract PDF; no ShedSuite Delivery Certificate lookup needed.'
+        elif should_queue:
+            detail = 'Waiting for background Chromium…'
+        else:
+            detail = 'Delivery Certificate was not requested.'
         items[oid] = {
-            'status': 'queued' if active else 'not_requested',
+            'status': 'queued' if should_queue else 'not_requested',
             'name': str(r.get('NAME', '') or oid),
-            'detail': 'Waiting for background Chromium…' if active else 'Delivery Certificate was not requested.',
+            'detail': detail,
         }
     _write_certificate_status(jp, {
-        'active': active,
-        'complete': not active,
+        'active': bool(active and queued_any),
+        'complete': not bool(active and queued_any),
         'headless': True,
         'items': items,
     })
@@ -2435,16 +2557,18 @@ def inventory_run_rto(job):
 
 @app.post('/process')
 def process():
-    # V7.1 accepts one or many ShedSuite contract-report CSVs in the same job.
-    files = [f for f in request.files.getlist('csv_files') if f and f.filename]
+    # V7.6 accepts any mix of ShedSuite CSVs and supported contract PDFs.
+    files = [f for f in request.files.getlist('contract_files') if f and f.filename]
     # Backward compatibility for bookmarked/older V7 pages.
+    if not files:
+        files = [f for f in request.files.getlist('csv_files') if f and f.filename]
     if not files:
         legacy = request.files.get('csv_file')
         if legacy and legacy.filename:
             files = [legacy]
 
     if not files:
-        flash('Choose one or more ShedSuite contracts CSV files.', 'error')
+        flash('Choose one or more ShedSuite CSV or contract PDF files.', 'error')
         return redirect(url_for('index'))
 
     job = uuid.uuid4().hex[:12]
@@ -2461,8 +2585,8 @@ def process():
     }
 
     try:
-        source_rows, input_summary, input_warnings = merge_shedsuite_csv_files(
-            files, jp / 'Input_CSVs', required
+        source_rows, input_summary, input_warnings = merge_contract_inputs(
+            files, jp, required
         )
     except ValueError as e:
         shutil.rmtree(jp, ignore_errors=True)
@@ -2471,7 +2595,7 @@ def process():
 
     if not source_rows:
         shutil.rmtree(jp, ignore_errors=True)
-        flash('The selected CSV files contain no contract rows.', 'error')
+        flash('The selected files contain no contract rows.', 'error')
         return redirect(url_for('index'))
 
     (jp / 'input_files.json').write_text(
@@ -2498,8 +2622,7 @@ def process():
         ),
     )
 
-    # Keep the original CSV filename on each transformed row for troubleshooting
-    # and preserve any duplicate-overlap notices from the multi-file merge.
+    # Keep the original input filename/source type on every transformed row.
     source_by_order_for_file = {
         str(x.get('Customer Order Id', '') or '').strip(): x
         for x in source_rows
@@ -2508,11 +2631,38 @@ def process():
         src_for_file = source_by_order_for_file.get(
             str(r.get('_source_order_id', '') or '').strip(), {}
         )
+        source_type = str(src_for_file.get('_import_source_type', 'csv') or 'csv').lower()
+        source_name = str(
+            src_for_file.get('_import_pdf_name', '')
+            or src_for_file.get('_import_csv_name', '')
+            or ''
+        )
+        r['_source_type'] = source_type
+        r['_source_file_name'] = source_name
         r['_source_csv_name'] = str(src_for_file.get('_import_csv_name', '') or '')
+        r['_source_pdf_name'] = str(src_for_file.get('_import_pdf_name', '') or '')
+        if source_type == 'pdf':
+            # PDF-only fields that do not have a ShedSuite transform equivalent.
+            if str(src_for_file.get('_pdf_salesperson_source', '') or '').strip():
+                r['SALESMAN'] = str(src_for_file.get('_pdf_salesperson_source', '') or '').strip()
+            if str(src_for_file.get('_pdf_county_of_delivery', '') or '').strip() and not str(r.get('COUNTY', '') or '').strip():
+                r['COUNTY'] = str(src_for_file.get('_pdf_county_of_delivery', '') or '').strip().upper()
+            if str(src_for_file.get('_pdf_contract_price', '') or '').strip():
+                r['CONTRACTAMT'] = str(src_for_file.get('_pdf_contract_price', '') or '').strip()
+            if str(src_for_file.get('_pdf_total_monthly_pmt', '') or '').strip():
+                r['PMT'] = str(src_for_file.get('_pdf_total_monthly_pmt', '') or '').strip()
+            if str(src_for_file.get('Date Created', '') or '').strip():
+                r['CONTRACTDATE'] = str(src_for_file.get('Date Created', '') or '').strip()
+            r['CONDITION1'] = str(src_for_file.get('Condition', '') or '').strip().upper()
     warnings.extend('Input: ' + x for x in input_warnings)
     if input_summary.get('file_count', 0) > 1:
+        parts = []
+        if input_summary.get('csv_count'):
+            parts.append(f"{input_summary['csv_count']} CSV")
+        if input_summary.get('pdf_count'):
+            parts.append(f"{input_summary['pdf_count']} PDF")
         warnings.append(
-            f"Input: merged {input_summary['file_count']} CSV files into "
+            f"Input: merged {' + '.join(parts) or str(input_summary['file_count']) + ' file(s)'} into "
             f"{input_summary['row_count']} unique contracts"
             + (f"; skipped {input_summary['duplicates_skipped']} duplicate(s)."
                if input_summary.get('duplicates_skipped') else '.')
@@ -2585,96 +2735,105 @@ def process():
     # -----------------------------------------------------------------------
     # PDF DOWNLOAD / COMBINE
     #
-    # Final combined PDF order:
-    #   1. Invoice
-    #   2. Customer Data Sheet
-    #   3. Contract
-    #   4. Any other files
-    #   5. ID
-    #   6. Delivery Certificate
+    # ShedSuite CSV rows keep the existing packet order and background Delivery
+    # Certificate workflow. Imported contract PDFs are already the source packet,
+    # so they are copied directly into Combined_Files and never sent to Chromium.
     # -----------------------------------------------------------------------
-    if request.form.get('download_pdfs') == 'yes':
-        by_order = {
-            str(x.get('Customer Order Id', '')).strip(): x
-            for x in source_rows
-        }
-        pdf_mode = request.form.get('pdf_mode', 'contract')
+    by_order = {
+        str(x.get('Customer Order Id', '')).strip(): x
+        for x in source_rows
+    }
+    download_requested = request.form.get('download_pdfs') == 'yes'
+    pdf_mode = request.form.get('pdf_mode', 'contract')
+    delivery_order_ids: set[str] = set()
 
-        # V6 keeps V3's fast direct-link behavior for the normal packet.
-        # Chromium is NOT used to crawl every ShedSuite file anymore.
-        for r in rows:
-            order_id = str(r.get('_source_order_id', '')).strip()
-            srcrow = by_order.get(order_id, {})
-            ordered_documents = build_ordered_document_list(srcrow, [])
+    for r in rows:
+        order_id = str(r.get('_source_order_id', '')).strip()
+        srcrow = by_order.get(order_id, {})
+        source_type = str(srcrow.get('_import_source_type', r.get('_source_type', 'csv')) or 'csv').lower()
+        base = safe_filename(r['_pdf_name'])
+        target = pdf_dir / f'{base}.pdf'
 
-            if pdf_mode != 'all':
-                ordered_documents = [
-                    (name, url)
-                    for name, url in ordered_documents
-                    if is_invoice(name) or is_contract(name)
-                ]
-
-            urls = [url for _name, url in ordered_documents]
-            base = safe_filename(r['_pdf_name'])
-            target = pdf_dir / f'{base}.pdf'
-
-            if urls:
-                errs = download_and_combine(urls, target)
-                pdf_errors.extend([f'{r["NAME"]}: {x}' for x in errs])
-
-            r['_pdf_manifest'] = [name for name, _url in ordered_documents]
-            r['_pdf_available'] = target.exists()
-
-        # V7: Delivery Certificates no longer block the review page. The
-        # Chromium lookup starts only after the editable rows have been saved,
-        # and runs headless in a daemon worker while the user reviews/edits.
-        for r in rows:
-            r['_delivery_certificate'] = 'Queued'
-            r['_delivery_certificate_method'] = ''
+        if source_type == 'pdf':
+            stored_name = str(srcrow.get('_import_pdf_stored_name', '') or '').strip()
+            original_pdf = jp / 'Input_PDFs' / stored_name if stored_name else None
+            if original_pdf and original_pdf.exists():
+                try:
+                    shutil.copy2(original_pdf, target)
+                    r['_pdf_manifest'] = ['Imported contract PDF']
+                    r['_pdf_available'] = True
+                except Exception as exc:
+                    pdf_errors.append(f'{r["NAME"]}: could not copy imported PDF ({exc})')
+            r['_delivery_certificate'] = 'Not requested'
+            r['_delivery_certificate_method'] = 'Imported PDF source'
             r['_delivery_certificate_name'] = ''
+        else:
+            # V6/V7 fast direct-link packet for ShedSuite. This part only runs
+            # when the user leaves Download PDFs enabled.
+            if download_requested:
+                ordered_documents = build_ordered_document_list(srcrow, [])
+                if pdf_mode != 'all':
+                    ordered_documents = [
+                        (name, url)
+                        for name, url in ordered_documents
+                        if is_invoice(name) or is_contract(name)
+                    ]
+                urls = [url for _name, url in ordered_documents]
+                if urls:
+                    errs = download_and_combine(urls, target)
+                    pdf_errors.extend([f'{r["NAME"]}: {x}' for x in errs])
+                r['_pdf_manifest'] = [name for name, _url in ordered_documents]
+                r['_pdf_available'] = target.exists()
+                r['_delivery_certificate'] = 'Queued'
+                r['_delivery_certificate_method'] = ''
+                r['_delivery_certificate_name'] = ''
+                delivery_order_ids.add(order_id)
+            else:
+                r['_delivery_certificate'] = 'Not requested'
+                r['_delivery_certificate_method'] = ''
+                r['_delivery_certificate_name'] = ''
 
-        # Run V3's existing PDF extraction against the fast/direct packet now.
-        # The background worker appends Delivery Certificate LAST later.
-        for r in rows:
-            base = safe_filename(r['_pdf_name'])
-            target = pdf_dir / f'{base}.pdf'
+        # Extract any immediately available PDF fields. For ShedSuite rows the
+        # Delivery Certificate worker may enrich these again later (coordinates).
+        if not target.exists():
+            r['_pdf_available'] = False
+            continue
 
-            if r.get('_delivery_certificate') == 'Downloaded':
-                r['_pdf_manifest'].append('Delivery Certificate')
-
-            if not target.exists():
-                r['_pdf_available'] = False
-                continue
-
+        try:
             fields = extract_pdf_fields(target)
+        except Exception as exc:
+            fields = {}
+            pdf_errors.append(f'{r["NAME"]}: PDF field extraction failed ({exc})')
 
-            r['_pdf_salesman'] = fields.get('salesman', '')
-            r['_pdf_coordinates'] = fields.get('coordinates', '')
-            r['_pdf_latitude'] = fields.get('latitude', '')
-            r['_pdf_longitude'] = fields.get('longitude', '')
-            r['_pdf_invoice'] = fields.get('invoice', '')
+        r['_pdf_salesman'] = fields.get('salesman', '')
+        r['_pdf_coordinates'] = fields.get('coordinates', '')
+        r['_pdf_latitude'] = fields.get('latitude', '')
+        r['_pdf_longitude'] = fields.get('longitude', '')
+        r['_pdf_invoice'] = fields.get('invoice', '')
 
-            if fields.get('salesman'):
-                r['SALESMAN'] = fields['salesman']
+        # A RentaBarn-style contract parser may already have a salesperson. The
+        # generic packet extractor only overwrites it when it actually finds one.
+        if fields.get('salesman'):
+            r['SALESMAN'] = fields['salesman']
 
-            if fields.get('coordinates'):
-                existing_direction = r.get('DIRECTIONS', '')
-                if fields['coordinates'] not in existing_direction:
-                    r['DIRECTIONS'] = (
-                        fields['coordinates']
-                        + (('      ' + existing_direction) if existing_direction else '')
-                    )
+        if fields.get('coordinates'):
+            existing_direction = r.get('DIRECTIONS', '')
+            if fields['coordinates'] not in existing_direction:
+                r['DIRECTIONS'] = (
+                    fields['coordinates']
+                    + (('      ' + existing_direction) if existing_direction else '')
+                )
 
-            if fields.get('invoice'):
-                r['INVOICE1'] = fields['invoice']
+        if fields.get('invoice'):
+            r['INVOICE1'] = fields['invoice']
 
-            r['_pdf_available'] = True
-            try:
-                _doc = fitz.open(target)
-                r['_pdf_pages'] = len(_doc)
-                _doc.close()
-            except Exception:
-                r['_pdf_pages'] = ''
+        r['_pdf_available'] = True
+        try:
+            _doc = fitz.open(target)
+            r['_pdf_pages'] = len(_doc)
+            _doc.close()
+        except Exception:
+            r['_pdf_pages'] = ''
 
     warnings.extend(
         'PDF: ' + x
@@ -2688,9 +2847,9 @@ def process():
 
     save_job_rows(jp, rows)
 
-    if request.form.get('download_pdfs') == 'yes':
+    if download_requested and delivery_order_ids:
         _initialize_certificate_status(jp, rows, active=True)
-        _start_certificate_worker(job)
+        _start_certificate_worker(job, delivery_order_ids)
     else:
         _initialize_certificate_status(jp, rows, active=False)
 
