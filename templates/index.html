@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
-  <title>ShedSuite → RTO Pro V7</title>
+  <title>ShedSuite → RTO Pro V7.1</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="landing">
@@ -12,7 +12,7 @@
     <header class="topbrand">
       <div>
         <div class="eyebrow">LOCAL RTO IMPORT TOOL</div>
-        <h1>ShedSuite → RTO Pro <span class="version-mark" style="font-size:.55em;opacity:.7">V7</span></h1>
+        <h1>ShedSuite → RTO Pro <span class="version-mark" style="font-size:.55em;opacity:.7">V7.1</span></h1>
         <p class="lede">Upload the ShedSuite contracts report, pull the PDFs, map the contracts, review customer/inventory/tax details, and export the final RTO Pro package.</p>
       </div>
     </header>
@@ -31,11 +31,12 @@
         <section>
           <div class="section-number">1</div>
           <div class="section-body">
-            <h2>ShedSuite contracts report</h2>
-            <p class="muted">Use the same <strong>RTO contracts report CSV</strong> you used with the Excel workbook.</p>
-            <label class="file-drop">
-              <span>Choose CSV</span>
-              <input type="file" name="csv_file" accept=".csv,text/csv" required>
+            <h2>ShedSuite contracts reports</h2>
+            <p class="muted">Select <strong>one or multiple RTO contracts report CSVs</strong>. V7.1 combines them into one review session and skips overlapping Customer Order IDs automatically.</p>
+            <label class="file-drop" id="csvFileDrop">
+              <span id="csvFilePrompt">Choose one or more CSVs</span>
+              <small id="csvFileSummary" class="file-summary">You can select several reports at the same time.</small>
+              <input type="file" id="csvFiles" name="csv_files" accept=".csv,text/csv" multiple required>
             </label>
             <div class="two-col compact-top">
               <label>PDF collection
@@ -81,6 +82,23 @@
       document.querySelectorAll('.landing-tab').forEach(x => x.classList.toggle('active', x === btn));
       document.querySelectorAll('.landing-tab-panel').forEach(x => x.classList.toggle('active', x.dataset.panel === tab));
     }));
+
+    const csvFiles = document.getElementById('csvFiles');
+    const csvPrompt = document.getElementById('csvFilePrompt');
+    const csvSummary = document.getElementById('csvFileSummary');
+    if (csvFiles) csvFiles.addEventListener('change', () => {
+      const files = Array.from(csvFiles.files || []);
+      if (!files.length) {
+        csvPrompt.textContent = 'Choose one or more CSVs';
+        csvSummary.textContent = 'You can select several reports at the same time.';
+        return;
+      }
+      csvPrompt.textContent = files.length === 1 ? '1 CSV selected' : `${files.length} CSVs selected`;
+      const names = files.map(f => f.name);
+      csvSummary.textContent = names.length <= 3
+        ? names.join(' • ')
+        : `${names.slice(0, 3).join(' • ')} • +${names.length - 3} more`;
+    });
   </script>
   <script src="{{ url_for('static', filename='theme.js') }}"></script>
 </body>

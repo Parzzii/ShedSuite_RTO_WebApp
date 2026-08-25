@@ -202,3 +202,6 @@ html[data-theme="dark"] .delivery-progress{background:#111827;border-color:#3341
 html[data-theme="cyberpunk"] .delivery-progress{background:linear-gradient(135deg,rgba(8,10,28,.94),rgba(20,6,28,.95));border-color:#00eaff;box-shadow:0 0 18px rgba(0,234,255,.22),0 0 30px rgba(255,0,153,.12)}
 html[data-theme="cyberpunk"] .delivery-progress-track{background:rgba(0,234,255,.09);box-shadow:inset 0 0 8px rgba(0,234,255,.25)}html[data-theme="cyberpunk"] .delivery-progress-track span{background:linear-gradient(90deg,#00eaff,#168bff,#ff2bd6,#ff3b30,#ff8a00,#ffe600);box-shadow:0 0 12px #ff2bd6}
 html[data-theme="cyberpunk"] .delivery-chip.working{color:#00eaff;border-color:#00eaff;box-shadow:0 0 8px rgba(0,234,255,.35)}html[data-theme="cyberpunk"] .delivery-chip.ready{color:#ffe600;border-color:#ffe600;box-shadow:0 0 8px rgba(255,230,0,.3)}html[data-theme="cyberpunk"] .delivery-chip.missing{color:#ff3b30;border-color:#ff3b30;box-shadow:0 0 8px rgba(255,59,48,.3)}
+
+/* V7.1 multi-CSV picker */
+.file-drop .file-summary{display:block;margin-top:.35rem;max-width:100%;font-size:.78rem;opacity:.72;overflow-wrap:anywhere}

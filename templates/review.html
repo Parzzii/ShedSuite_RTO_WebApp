@@ -13,6 +13,7 @@
       <div>
         <a class="backlink" href="{{ url_for('index') }}">← New import</a>
         <strong>{{rows|length}} contracts</strong>
+        {% if input_summary and input_summary.file_count %}<span class="db-pill good">{{input_summary.file_count}} CSV{{'' if input_summary.file_count == 1 else 's'}} merged{% if input_summary.duplicates_skipped %} · {{input_summary.duplicates_skipped}} duplicate{{'' if input_summary.duplicates_skipped == 1 else 's'}} skipped{% endif %}</span>{% endif %}
         <span class="db-pill {{'good' if refs.connected else 'bad'}}">Firebird {{'connected' if refs.connected else 'not connected'}}</span>
       </div>
       <div class="sticky-actions">

@@ -1,4 +1,4 @@
-ShedSuite RTO Web App V7
+ShedSuite RTO Web App V7.1
 ========================
 
 Base: V3.0.0
@@ -74,6 +74,15 @@ V6.3.4/6.3.5 - Themes
 - Hidden Cyberpunk theme easter egg.
 - Secret: Alt+Shift+K, or click the version label five times quickly on the first page.
 
+
+
+V7.1 - Multiple CSV Input
+-------------------------
+- Select one or multiple ShedSuite RTO contracts CSVs on the first page.
+- All selected CSVs merge into one review session.
+- Overlapping Customer Order IDs are skipped so the same contract is not imported twice.
+- The review bar shows how many CSVs were merged and how many duplicates were skipped.
+- Original CSVs are kept only in the local work/job Input_CSVs folder.
 
 V7 - Discard + Phone Normalization
 ----------------------------------------

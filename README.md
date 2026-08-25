@@ -1,8 +1,18 @@
-# ShedSuite → RTO Pro Web App V7
+# ShedSuite → RTO Pro Web App V7.1
 
 V7 adds immediate per-contract Discard on the review screen and normalizes 11-digit US phone numbers beginning with country code 1 before applying the existing phone comparison rule. It also retains the V6.3.5 theme fixes and expanded hidden Cyberpunk palette.
 
 V7 is built on the V3 workflow of the local browser replacement for `Contract_Import.xlsm` + `Contract_Import.py` from **Shedsuite_Import V1.1.7.6**.
+
+## V7.1 multiple CSV import
+
+- The import screen accepts **multiple ShedSuite RTO contracts CSV files at once**.
+- All selected reports are merged into one review/edit session before the existing V7 workflow runs.
+- Store/dealer/company rules are still evaluated per contract row, so rows from different reports keep their own mapping logic.
+- Overlapping reports are deduplicated by ShedSuite `Customer Order Id`; the first occurrence is kept and later duplicates are skipped.
+- Original selected CSVs are saved inside the local job's `Input_CSVs` folder for troubleshooting, but remain excluded from Git by the existing `work/` ignore rule.
+- Each transformed row retains `_source_csv_name` in the review report/source metadata so its originating CSV can be identified.
+- Delivery Certificate background processing runs across the combined unique contract set exactly as in V7.
 
 ## V7 background Delivery Certificates
 

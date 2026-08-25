@@ -1431,6 +1431,90 @@ def read_csv_file(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def read_csv_file_with_headers(path: Path) -> tuple[list[dict[str, str]], list[str]]:
+    """Read one ShedSuite CSV and preserve its header list even when it has no rows."""
+    with path.open('r', encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        return rows, list(reader.fieldnames or [])
+
+
+def _safe_input_csv_name(filename: str, index: int) -> str:
+    """Create a stable local filename without trusting the browser-supplied path."""
+    original = Path(str(filename or '')).name
+    stem = safe_filename(Path(original).stem or f'input_{index}')
+    return f'{index:02d}_{stem}.csv'
+
+
+def merge_shedsuite_csv_files(files, input_dir: Path, required: set[str]) -> tuple[list[dict[str, str]], dict, list[str]]:
+    """Save, validate and merge multiple ShedSuite contract-report CSV files.
+
+    Duplicate ShedSuite Customer Order IDs are kept only once. This makes
+    overlapping reports safe and also prevents selecting the same CSV twice
+    from producing duplicate RTO contracts. The first occurrence wins.
+    """
+    input_dir.mkdir(parents=True, exist_ok=True)
+    merged: list[dict[str, str]] = []
+    seen_order_ids: dict[str, str] = {}
+    duplicate_messages: list[str] = []
+    file_summaries: list[dict] = []
+
+    for index, uploaded in enumerate(files, 1):
+        original_name = Path(str(uploaded.filename or '')).name or f'input_{index}.csv'
+        stored_name = _safe_input_csv_name(original_name, index)
+        saved_path = input_dir / stored_name
+        uploaded.save(saved_path)
+
+        try:
+            rows, headers = read_csv_file_with_headers(saved_path)
+        except Exception as exc:
+            raise ValueError(f'{original_name}: could not read CSV ({exc})') from exc
+
+        missing = sorted(required - set(headers))
+        if missing:
+            raise ValueError(
+                f'{original_name}: this does not match the ShedSuite RTO contracts report format. '
+                f'Missing column(s): {", ".join(missing)}'
+            )
+
+        accepted = 0
+        duplicates = 0
+        for raw in rows:
+            row = dict(raw or {})
+            row['_import_csv_name'] = original_name
+            order_id = str(row.get('Customer Order Id', '') or '').strip()
+            order_key = order_id.casefold()
+
+            if order_key and order_key in seen_order_ids:
+                duplicates += 1
+                duplicate_messages.append(
+                    f'Duplicate ShedSuite order {order_id} in {original_name} was skipped; '
+                    f'already loaded from {seen_order_ids[order_key]}.'
+                )
+                continue
+
+            if order_key:
+                seen_order_ids[order_key] = original_name
+            merged.append(row)
+            accepted += 1
+
+        file_summaries.append({
+            'name': original_name,
+            'stored_name': stored_name,
+            'rows': len(rows),
+            'accepted': accepted,
+            'duplicates_skipped': duplicates,
+        })
+
+    summary = {
+        'file_count': len(file_summaries),
+        'row_count': len(merged),
+        'duplicates_skipped': sum(x['duplicates_skipped'] for x in file_summaries),
+        'files': file_summaries,
+    }
+    return merged, summary, duplicate_messages
+
+
 def write_import_csv(rows: list[dict], path: Path):
     # Keep the downloadable/job copy UTF-8 with BOM for Excel friendliness.
     # RTO Pro itself gets a separate ANSI/CP1252 staging copy immediately
@@ -1560,6 +1644,7 @@ def write_review_csv(rows: list[dict], path: Path):
     fields = [
         'NAME',
         '_source_order_id',
+        '_source_csv_name',
         'SERIAL1',
         '_source_company',
         '_source_dealer',
@@ -1895,24 +1980,21 @@ def index():
 
 @app.post('/process')
 def process():
-    f = request.files.get('csv_file')
+    # V7.1 accepts one or many ShedSuite contract-report CSVs in the same job.
+    files = [f for f in request.files.getlist('csv_files') if f and f.filename]
+    # Backward compatibility for bookmarked/older V7 pages.
+    if not files:
+        legacy = request.files.get('csv_file')
+        if legacy and legacy.filename:
+            files = [legacy]
 
-    if not f or not f.filename:
-        flash('Choose the ShedSuite contracts CSV.', 'error')
+    if not files:
+        flash('Choose one or more ShedSuite contracts CSV files.', 'error')
         return redirect(url_for('index'))
 
     job = uuid.uuid4().hex[:12]
     jp = job_path(job)
     jp.mkdir(parents=True, exist_ok=True)
-
-    src = jp / 'input.csv'
-    f.save(src)
-
-    try:
-        source_rows = read_csv_file(src)
-    except Exception as e:
-        flash(f'Could not read the CSV: {e}', 'error')
-        return redirect(url_for('index'))
 
     required = {
         'Serial Number',
@@ -1923,12 +2005,23 @@ def process():
         'Dealer',
     }
 
-    if not source_rows or not required.issubset(source_rows[0].keys()):
-        flash(
-            'This does not match the ShedSuite RTO contracts report format.',
-            'error',
+    try:
+        source_rows, input_summary, input_warnings = merge_shedsuite_csv_files(
+            files, jp / 'Input_CSVs', required
         )
+    except ValueError as e:
+        shutil.rmtree(jp, ignore_errors=True)
+        flash(str(e), 'error')
         return redirect(url_for('index'))
+
+    if not source_rows:
+        shutil.rmtree(jp, ignore_errors=True)
+        flash('The selected CSV files contain no contract rows.', 'error')
+        return redirect(url_for('index'))
+
+    (jp / 'input_files.json').write_text(
+        json.dumps(input_summary, indent=2), encoding='utf-8'
+    )
 
     dsn = request.form.get('dsn', '').strip()
     db_user = request.form.get('db_user', '').strip()
@@ -1949,6 +2042,26 @@ def process():
             os.getenv('ZIPTAX_API_KEY', '')
         ),
     )
+
+    # Keep the original CSV filename on each transformed row for troubleshooting
+    # and preserve any duplicate-overlap notices from the multi-file merge.
+    source_by_order_for_file = {
+        str(x.get('Customer Order Id', '') or '').strip(): x
+        for x in source_rows
+    }
+    for r in rows:
+        src_for_file = source_by_order_for_file.get(
+            str(r.get('_source_order_id', '') or '').strip(), {}
+        )
+        r['_source_csv_name'] = str(src_for_file.get('_import_csv_name', '') or '')
+    warnings.extend('Input: ' + x for x in input_warnings)
+    if input_summary.get('file_count', 0) > 1:
+        warnings.append(
+            f"Input: merged {input_summary['file_count']} CSV files into "
+            f"{input_summary['row_count']} unique contracts"
+            + (f"; skipped {input_summary['duplicates_skipped']} duplicate(s)."
+               if input_summary.get('duplicates_skipped') else '.')
+        )
 
     # Keep DOB as the exact calendar date written in the ShedSuite CSV.
     fix_dobs_from_source(rows, source_rows)
@@ -2161,6 +2274,14 @@ def review(job):
         for r in rows
     ]
 
+    input_summary = {}
+    input_summary_path = jp / 'input_files.json'
+    if input_summary_path.exists():
+        try:
+            input_summary = json.loads(input_summary_path.read_text(encoding='utf-8'))
+        except Exception:
+            input_summary = {}
+
     page_html = render_template(
         'review.html',
         job=job,
@@ -2169,6 +2290,7 @@ def review(job):
         warnings=warnings,
         headers=RTO_HEADERS,
         sources=sources,
+        input_summary=input_summary,
     )
     return inject_review_panels(page_html, source_rows, rows, job, refs)
 
