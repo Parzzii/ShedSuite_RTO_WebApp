@@ -162,3 +162,14 @@ upper-cased value.
 - Secret activation: press `Alt + Shift + K` anywhere, or click the V7 version label five times quickly on the landing page.
 - The selected theme is stored only in the browser (`localStorage`) and follows you across app pages.
 - Clicking the normal theme button while Cyberpunk is active returns to normal Dark Mode.
+
+## V7.5 — Contracts or Inventory
+
+The landing page now asks which workflow to use:
+
+- **Contracts** keeps the existing V7.2 multi-CSV review workflow, background Delivery Certificates, live coordinate updates, used-building suffixes, PDF imaging, and customer/contract RTO import.
+- **Inventory** opens a dedicated inventory-only receiver. No ShedSuite CSV is required. Click **Add inventory**, choose the company/model series, and the app suggests the next model number from the live RTO Pro Inventory table when Firebird is connected. Brand, Vendor, Store and Agent are filled from the existing company/store rules and remain editable.
+
+Inventory-only rows support Model, Serial, Stock, Date Received, Category, Description, Brand, Vendor, Agent, Invoice, Cost, Retail, RTO price, Rental/Retail, Quantity and BOR. Model + Serial are the RTO Pro inventory receiver's core required identifiers; V7.5 also requires Company and Store to protect this Central Server workflow from ambiguous entries.
+
+The inventory CSV uses RTO Pro's inventory-receive field names and launches RTO Pro with the inventory receiver (`-r`) instead of the customer/contract importer (`-importcust`). The downloadable file is `InventoryImport.csv`.

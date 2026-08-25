@@ -41,6 +41,8 @@ from rto_transform import (
     ziptax_detail,
     resolve_taxzone,
     phone,
+    build_next_model_suggestions,
+    MODEL_SERIES,
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
 from delivery_certificate import append_delivery_certificates
@@ -108,6 +110,36 @@ DEFAULT_MODEL_SERIES = {
 # reused, while a used building must keep its original MODEL1.  V6.3.2 therefore
 # keeps MODEL1 untouched and assigns CONTRACT = MODEL1 + suffix.
 USED_CONTRACT_SUFFIXES = ['U'] + [chr(c) for c in range(ord('A'), ord('Z') + 1) if chr(c) != 'U']
+
+
+# V7.5 inventory-only receiving. RTO Pro's inventory receiver is a different
+# import path from -importcust, and uses these field names with -r.
+INVENTORY_HEADERS = [
+    'model', 'serial', 'stock', 'daterec', 'cost', 'balance', 'rbvbook',
+    'description', 'invoice', 'brand', 'category', 'vendor', 'agent', 'bor',
+    'rentalretail', 'quantity', 'store', 'retail', 'rto',
+]
+
+# Company/model-series choices reuse the exact numbering profiles already used
+# by the contract workflow. Brand/vendor values are the canonical V6.3.3 names.
+INVENTORY_PROFILES = {
+    'MAG_GA': {'label': 'SMART SHED — GA', 'brand': 'SMART SHED', 'store': '8', 'tracker': 'magnolia_smart_shed_ga'},
+    'MAG_SC': {'label': 'SMART SHED — SC', 'brand': 'SMART SHED', 'store': '8', 'tracker': 'magnolia_smart_shed_sc'},
+    'MAG_NC': {'label': 'SMART SHED — NC', 'brand': 'SMART SHED', 'store': '8', 'tracker': 'magnolia_smart_shed_nc'},
+    'MAG_TN': {'label': 'SMART SHED — TN', 'brand': 'SMART SHED', 'store': '8', 'tracker': 'magnolia_smart_shed_tn'},
+    'CRF_ALPINE': {'label': 'ALPINE', 'brand': 'ALPINE', 'store': '1', 'tracker': 'crf_alpine'},
+    'CRF_GENESIS': {'label': 'GENESIS', 'brand': 'GENESIS', 'store': '1', 'tracker': 'crf_genesis'},
+    'CRF_PHOENIX': {'label': 'PHOENIX — Carefree', 'brand': 'PHOENIX', 'store': '1', 'tracker': 'crf_phoenix'},
+    'CRF_4_SEASONS': {'label': '4 SEASONS', 'brand': '4 SEASONS', 'store': '1', 'tracker': 'crf_4_seasons'},
+    'DBM_PHOENIX': {'label': 'PHOENIX — Dutch Boy', 'brand': 'PHOENIX', 'store': '2', 'tracker': 'dbm_phoenix'},
+    'WWP': {'label': 'WESTWOOD SHEDS', 'brand': 'WESTWOOD SHEDS', 'store': '11', 'tracker': 'wwp'},
+    'RAS_YSS': {'label': 'YODER STORAGE', 'brand': 'YODER STORAGE', 'store': '6', 'tracker': 'ras_yss'},
+    'LSR_TX': {'label': 'LONESTAR SHEDS', 'brand': 'LONESTAR SHEDS', 'store': '7', 'tracker': 'lsr_tx'},
+    # No model-number sequence for TRUE BUILT exists in the original workbook,
+    # so V7.5 will not invent one. The model stays manually editable.
+    'TRUE_BUILT': {'label': 'TRUE BUILT — manual model', 'brand': 'TRUE BUILT', 'store': '', 'tracker': ''},
+    'CUSTOM': {'label': 'OTHER / CUSTOM', 'brand': '', 'store': '', 'tracker': ''},
+}
 
 
 def _contract_key(value) -> str:
@@ -814,6 +846,232 @@ def next_model(last_used, prefix):
     suffix_text = match.group(1)
     next_number = str(int(suffix_text) + 1).zfill(len(suffix_text))
     return f'{prefix}-{next_number}' if prefix else next_number
+
+
+
+def _format_series_model(profile: str, number: int) -> str:
+    rule = MODEL_SERIES.get(profile)
+    if not rule:
+        return ''
+    prefix, _lo, _hi, pad3 = rule
+    return prefix + (f'{number:03d}' if pad3 else str(number))
+
+
+def inventory_profile_payload(ref: ReferenceData) -> list[dict]:
+    """Build V7.5 company choices with live inventory-based model suggestions."""
+    tracker = load_model_tracker()
+    live_next = build_next_model_suggestions(ref) if ref.connected else {}
+    models = [str(x.get('model', '') or '').strip() for x in (ref.existing_serials or [])]
+    agents_by_store = {
+        str(x.get('store', '') or '').strip(): str(x.get('agent', '') or '').strip()
+        for x in (ref.agents or [])
+        if str(x.get('store', '') or '').strip()
+    }
+    stores = ref.centralserver or KNOWN_STORES
+    store_titles = {
+        str(x.get('store', '') or '').strip(): str(x.get('storetitle', '') or x.get('storename', '') or '').strip()
+        for x in stores
+    }
+
+    payload = []
+    for profile, meta in INVENTORY_PROFILES.items():
+        latest = ''
+        suggested = ''
+        if profile in MODEL_SERIES:
+            prefix, lo, hi, _pad3 = MODEL_SERIES[profile]
+            vals = []
+            for model in models:
+                if not model.startswith(prefix):
+                    continue
+                tail = model[len(prefix):]
+                if tail.isdigit() and lo <= int(tail) <= hi:
+                    vals.append(int(tail))
+            if vals:
+                latest = _format_series_model(profile, max(vals))
+            if ref.connected:
+                suggested = str(live_next.get(profile, '') or '').strip()
+
+        tracker_key = meta.get('tracker', '')
+        tracked = tracker.get(tracker_key, {}) if tracker_key else {}
+        if not latest:
+            latest = str(tracked.get('last_used', '') or '').strip()
+        if not suggested and latest:
+            tracker_prefix = str(tracked.get('prefix', '') or '').strip()
+            suggested = next_model(latest, tracker_prefix)
+            if suggested.endswith('-?') or suggested == '?':
+                suggested = ''
+
+        store = str(meta.get('store', '') or '').strip()
+        payload.append({
+            'profile': profile,
+            'label': meta.get('label', profile),
+            'brand': meta.get('brand', ''),
+            'vendor': meta.get('brand', ''),
+            'store': store,
+            'store_title': store_titles.get(store, ''),
+            'agent': agents_by_store.get(store, ''),
+            'latest_model': latest,
+            'suggested_model': suggested,
+        })
+    return payload
+
+
+def _inventory_refs_path(jp: Path) -> Path:
+    return jp / 'inventory_refs.json'
+
+
+def _inventory_rows_path(jp: Path) -> Path:
+    return jp / 'inventory_rows.json'
+
+
+def load_inventory_job(job: str) -> tuple[Path, list[dict], dict]:
+    jp = job_path(job)
+    if not jp.exists():
+        abort(404)
+    try:
+        rows = json.loads(_inventory_rows_path(jp).read_text(encoding='utf-8'))
+    except Exception:
+        rows = []
+    try:
+        refs = json.loads(_inventory_refs_path(jp).read_text(encoding='utf-8'))
+    except Exception:
+        refs = {'profiles': [], 'stores': KNOWN_STORES, 'agents': [], 'connected': False, 'error': ''}
+    return jp, rows if isinstance(rows, list) else [], refs if isinstance(refs, dict) else {}
+
+
+def _inventory_number(value) -> str:
+    text = str(value or '').strip().replace('$', '').replace(',', '')
+    if not text:
+        return ''
+    try:
+        number = float(text)
+        return str(int(number)) if number.is_integer() else ('%.2f' % number).rstrip('0').rstrip('.')
+    except Exception:
+        return text
+
+
+def normalize_inventory_rows(rows: list[dict]) -> list[dict]:
+    out = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        row = {h: str(raw.get(h, '') or '').strip() for h in INVENTORY_HEADERS}
+        row['company_profile'] = str(raw.get('company_profile', '') or '').strip()
+        row['model'] = row['model'][:15]
+        row['serial'] = row['serial'][:30]
+        row['stock'] = row['stock'][:15]
+        row['description'] = row['description'][:250]
+        row['invoice'] = row['invoice'][:15]
+        row['brand'] = row['brand'].upper()[:15]
+        row['vendor'] = row['vendor'].upper()[:15]
+        row['category'] = (row['category'] or 'NONE')[:31]
+        row['agent'] = row['agent'][:30]
+        row['store'] = row['store'][:10]
+        row['daterec'] = row['daterec'] or datetime.now().strftime('%m/%d/%Y')
+        row['quantity'] = row['quantity'] or '1'
+        row['rentalretail'] = (row['rentalretail'] or 'RENTAL').upper()
+        row['bor'] = (row['bor'] or 'NO').upper()
+        row['cost'] = _inventory_number(row['cost'])
+        row['retail'] = _inventory_number(row['retail'])
+        row['rto'] = _inventory_number(row['rto'])
+        # Let RTO Pro default BALANCE/RBVBOOK to cost when blank, matching its
+        # documented receiver behavior.
+        row['balance'] = _inventory_number(row['balance'])
+        row['rbvbook'] = _inventory_number(row['rbvbook'])
+        out.append(row)
+    return out
+
+
+def validate_inventory_rows(rows: list[dict], refs: dict | None = None) -> list[str]:
+    errors = []
+    seen_pairs = set()
+    existing_pairs = set((refs or {}).get('existing_pairs', []) or [])
+    for i, r in enumerate(rows, 1):
+        model = str(r.get('model', '') or '').strip()
+        serial = str(r.get('serial', '') or '').strip()
+        store = str(r.get('store', '') or '').strip()
+        label = f'Inventory {i}'
+        if not str(r.get('company_profile', '') or '').strip():
+            errors.append(f'{label}: choose a company.')
+        if not model:
+            errors.append(f'{label}: Model is required.')
+        if not serial:
+            errors.append(f'{label}: Serial is required.')
+        if not store:
+            errors.append(f'{label}: Store is required.')
+        if len(model) > 15:
+            errors.append(f'{label}: Model exceeds 15 characters.')
+        if len(serial) > 30:
+            errors.append(f'{label}: Serial exceeds 30 characters.')
+        if r.get('stock') and not str(r.get('stock')).isdigit():
+            errors.append(f'{label}: Stock must be numeric when entered.')
+        if model and serial:
+            pair = f'{model.upper()}|{serial.upper()}'
+            if pair in seen_pairs:
+                errors.append(f'{label}: {model} / {serial} is duplicated in this batch.')
+            seen_pairs.add(pair)
+            if pair in existing_pairs:
+                errors.append(f'{label}: {model} / {serial} already exists in RTO Pro inventory.')
+    return list(dict.fromkeys(errors))
+
+
+def write_inventory_csv(rows: list[dict], path: Path, encoding: str = 'utf-8-sig') -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', encoding=encoding, errors='replace', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=INVENTORY_HEADERS, extrasaction='ignore', lineterminator='\r\n')
+        w.writeheader()
+        for r in rows:
+            w.writerow({h: r.get(h, '') for h in INVENTORY_HEADERS})
+
+
+def save_inventory_job(jp: Path, rows: list[dict], refs: dict) -> list[dict]:
+    clean_rows = normalize_inventory_rows(rows)
+    errors = validate_inventory_rows(clean_rows, refs)
+    if errors:
+        raise ValueError(' | '.join(errors[:10]))
+    _inventory_rows_path(jp).write_text(json.dumps(clean_rows, indent=2), encoding='utf-8')
+    write_inventory_csv(clean_rows, jp / 'InventoryImport.csv')
+    with ZipFile(jp / 'Inventory_Import_Package.zip', 'w', ZIP_DEFLATED) as z:
+        z.write(jp / 'InventoryImport.csv', 'InventoryImport.csv')
+        for name in ['InventoryImport_LAUNCHED.csv', 'Run_RTO_Inventory_Import.cmd', 'RTO_Inventory_Launch_Command.txt']:
+            p = jp / name
+            if p.exists():
+                z.write(p, name)
+    return clean_rows
+
+
+def stage_inventory_import(rows: list[dict], jp: Path, exe: Path) -> Path:
+    configured = os.getenv('RTO_INVENTORY_STAGING', '').strip()
+    local_app = os.getenv('LOCALAPPDATA', '').strip()
+    temp_root = os.getenv('TEMP', '').strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(exe.parent / 'inventory_import.csv')
+    if local_app:
+        candidates.append(Path(local_app) / 'ShedSuiteRTO' / 'inventory_import.csv')
+    if temp_root:
+        candidates.append(Path(temp_root) / 'ShedSuiteRTO' / 'inventory_import.csv')
+    candidates.append(jp / 'inventory_import_runtime.csv')
+
+    failures = []
+    seen = set()
+    for staging in candidates:
+        key = str(staging).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            write_inventory_csv(rows, staging, encoding='cp1252')
+            with staging.open('r', encoding='cp1252', errors='replace', newline='') as f:
+                headers = next(csv.reader(f), [])
+            if headers != INVENTORY_HEADERS:
+                raise RuntimeError('inventory header row does not match RTO Pro receiver fields')
+            shutil.copy2(staging, jp / 'InventoryImport_LAUNCHED.csv')
+            return staging
+        except (PermissionError, OSError, RuntimeError) as exc:
+            failures.append(f'{staging}: {exc}')
+    raise RuntimeError('Could not create a writable inventory import CSV. Tried: ' + ' | '.join(failures))
 
 
 def update_model_tracker(rows, source_rows):
@@ -2053,6 +2311,126 @@ def index():
         'index.html',
         dsn=os.getenv('RTO_DSN', 'Firebird DSN'),
     )
+
+
+
+@app.post('/inventory/start')
+def inventory_start():
+    job = uuid.uuid4().hex[:12]
+    jp = job_path(job)
+    jp.mkdir(parents=True, exist_ok=True)
+
+    dsn = request.form.get('dsn', '').strip()
+    db_user = request.form.get('db_user', '').strip()
+    db_password = request.form.get('db_password', '')
+    JOB_DB_PASSWORDS[job] = db_password
+
+    ref = load_reference_data(dsn, db_user, db_password)
+    profiles = inventory_profile_payload(ref)
+    refs = ref.as_client_dict()
+    refs.update({
+        'profiles': profiles,
+        'existing_pairs': [
+            f"{str(x.get('model', '') or '').strip().upper()}|{str(x.get('serial', '') or '').strip().upper()}"
+            for x in (ref.existing_serials or [])
+            if str(x.get('model', '') or '').strip() and str(x.get('serial', '') or '').strip()
+        ],
+    })
+
+    (jp / 'job_config.json').write_text(
+        json.dumps({'dsn': dsn, 'db_user': db_user, 'mode': 'inventory'}, indent=2),
+        encoding='utf-8',
+    )
+    _inventory_refs_path(jp).write_text(json.dumps(refs, indent=2), encoding='utf-8')
+    _inventory_rows_path(jp).write_text('[]', encoding='utf-8')
+    write_inventory_csv([], jp / 'InventoryImport.csv')
+    return redirect(url_for('inventory_review', job=job))
+
+
+@app.get('/inventory/<job>')
+def inventory_review(job):
+    jp, rows, refs = load_inventory_job(job)
+    return render_template(
+        'inventory.html',
+        job=job,
+        rows=rows,
+        refs=refs,
+        inventory_headers=INVENTORY_HEADERS,
+    )
+
+
+@app.post('/api/inventory/<job>/save')
+def inventory_save(job):
+    jp, _old_rows, refs = load_inventory_job(job)
+    data = request.get_json(silent=True) or {}
+    rows = data.get('rows', [])
+    if not isinstance(rows, list):
+        return jsonify({'ok': False, 'error': 'Inventory payload must be a list.'}), 400
+    try:
+        clean_rows = save_inventory_job(jp, rows, refs)
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    return jsonify({'ok': True, 'count': len(clean_rows)})
+
+
+@app.get('/inventory/<job>/download')
+def inventory_download(job):
+    jp, _rows, _refs = load_inventory_job(job)
+    p = jp / 'InventoryImport.csv'
+    if not p.exists():
+        abort(404)
+    return send_file(p, as_attachment=True, download_name='InventoryImport.csv')
+
+
+@app.get('/inventory/<job>/package')
+def inventory_package(job):
+    jp, rows, refs = load_inventory_job(job)
+    try:
+        save_inventory_job(jp, rows, refs)
+    except ValueError as e:
+        flash('Inventory package blocked: ' + str(e), 'error')
+        return redirect(url_for('inventory_review', job=job))
+    return send_file(jp / 'Inventory_Import_Package.zip', as_attachment=True)
+
+
+@app.post('/inventory/<job>/run-rto')
+def inventory_run_rto(job):
+    jp, rows, refs = load_inventory_job(job)
+    try:
+        rows = save_inventory_job(jp, rows, refs)
+    except ValueError as e:
+        flash('Inventory import blocked: ' + str(e), 'error')
+        return redirect(url_for('inventory_review', job=job))
+
+    exe = Path(os.getenv('RTO_EXE', r'C:\RTOwin\RTO-win.exe'))
+    try:
+        staging = stage_inventory_import(rows, jp, exe)
+    except Exception as e:
+        flash('Could not prepare the inventory import: ' + str(e), 'error')
+        return redirect(url_for('inventory_review', job=job))
+
+    if os.getenv('ENABLE_RTO_LAUNCH', 'true').lower() != 'true':
+        flash(f'Inventory file is ready at {staging}, but RTO launch is disabled in .env.', 'error')
+        return redirect(url_for('inventory_review', job=job))
+
+    if os.name != 'nt' or not exe.exists():
+        flash(f'RTO Pro executable not found: {exe}. The inventory file is ready at {staging}.', 'error')
+        return redirect(url_for('inventory_review', job=job))
+
+    try:
+        command_parts = [str(exe), '-r', str(staging)]
+        command_line = f'"{exe}" -r "{staging}"'
+        (jp / 'Run_RTO_Inventory_Import.cmd').write_text(
+            '@echo off\r\n' + f'cd /d "{exe.parent}"\r\n' + command_line + '\r\n',
+            encoding='cp1252',
+        )
+        (jp / 'RTO_Inventory_Launch_Command.txt').write_text(command_line + '\n', encoding='utf-8')
+        subprocess.Popen(command_parts, cwd=str(exe.parent), shell=False)
+        save_inventory_job(jp, rows, refs)
+        flash(f'RTO Pro inventory receiver launched for {len(rows)} item(s).', 'ok')
+    except Exception as e:
+        flash('RTO Pro inventory receiver could not be launched: ' + str(e), 'error')
+    return redirect(url_for('inventory_review', job=job))
 
 
 @app.post('/process')

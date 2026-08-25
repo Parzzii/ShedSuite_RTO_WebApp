@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
+  <title>Inventory · ShedSuite → RTO Pro V7.5</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="stickybar">
+    <div class="sticky-inner">
+      <div>
+        <a class="backlink" href="{{ url_for('index') }}?mode=inventory">← New inventory batch</a>
+        <strong id="inventoryCount">{{ rows|length }} inventory item{{ '' if rows|length == 1 else 's' }}</strong>
+        <span class="db-pill {{'good' if refs.connected else 'bad'}}">Firebird {{'connected' if refs.connected else 'not connected'}}</span>
+      </div>
+      <div class="sticky-actions">
+        <button type="button" class="secondary" id="saveInventoryTop">Save batch</button>
+        <button type="button" class="primary" id="downloadInventory">Download inventory CSV</button>
+        <button type="button" class="button dark" id="runInventory">Import Inventory to RTO Pro</button>
+      </div>
+    </div>
+  </div>
+
+  <main class="shell wide inventory-shell">
+    <header class="review-head inventory-head">
+      <div>
+        <div class="eyebrow">V7.5 · INVENTORY ONLY</div>
+        <h1>Add inventory</h1>
+        <p class="lede small">Choose the company/model series on each building. V7.5 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
+      </div>
+      <button type="button" class="primary big inventory-add" id="addInventory">+ Add inventory</button>
+    </header>
+
+    {% with messages=get_flashed_messages(with_categories=true) %}
+      {% for cat,msg in messages %}<div class="flash {{cat}}">{{msg}}</div>{% endfor %}
+    {% endwith %}
+
+    {% if refs.error %}<div class="connection-warning"><strong>Firebird lookup:</strong> {{refs.error}}<br><span>Inventory entry still works, but model suggestions fall back to the saved tracker and existing-inventory duplicate checks may be unavailable.</span></div>{% endif %}
+
+    <section class="inventory-guide">
+      <div><strong>Required</strong><span>Company, Model, Serial, Store</span></div>
+      <div><strong>Automatic</strong><span>Next model, Brand, Vendor, Agent, received date</span></div>
+      <div><strong>Editable</strong><span>Category, Description, Cost, Retail, RTO, Stock, Invoice</span></div>
+    </section>
+
+    <div id="inventoryValidation" class="validation-banner hidden"></div>
+    <div id="inventoryCards" class="inventory-card-list"></div>
+    <div id="inventoryEmpty" class="empty-state hidden">
+      <h2>No inventory added yet</h2>
+      <p>Click <strong>Add inventory</strong>, choose the company, then enter the serial and any other inventory details.</p>
+      <button type="button" class="primary" id="addInventoryEmpty">+ Add inventory</button>
+    </div>
+  </main>
+
+  <script id="inventoryRows" type="application/json">{{ rows|tojson }}</script>
+  <script id="inventoryRefs" type="application/json">{{ refs|tojson }}</script>
+  <script>window.INVENTORY_JOB={{ job|tojson }};</script>
+  <script>
+  (() => {
+    let rows = JSON.parse(document.getElementById('inventoryRows').textContent || '[]');
+    const refs = JSON.parse(document.getElementById('inventoryRefs').textContent || '{}');
+    const profiles = Array.isArray(refs.profiles) ? refs.profiles : [];
+    const stores = Array.isArray(refs.stores) ? refs.stores : [];
+    const agents = Array.isArray(refs.agents) ? refs.agents : [];
+    const existingPairs = new Set(Array.isArray(refs.existing_pairs) ? refs.existing_pairs : []);
+    const cards = document.getElementById('inventoryCards');
+    const empty = document.getElementById('inventoryEmpty');
+    const validation = document.getElementById('inventoryValidation');
+    const count = document.getElementById('inventoryCount');
+    const esc = s => String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const clean = s => String(s ?? '').trim();
+    const today = () => {
+      const d=new Date();
+      return String(d.getMonth()+1).padStart(2,'0')+'/'+String(d.getDate()).padStart(2,'0')+'/'+d.getFullYear();
+    };
+    const profileById = id => profiles.find(p => p.profile === id) || null;
+    const storeId = s => clean(s.store ?? s.STORE);
+    const storeTitle = s => clean(s.storetitle ?? s.STORETITLE ?? s.storename ?? s.STORENAME) || `Store ${storeId(s)}`;
+    const agentForStore = store => {
+      const a=agents.find(x=>clean(x.store ?? x.STORE)===clean(store));
+      return a ? clean(a.agent ?? a.AGENT) : '';
+    };
+
+    function incrementModel(model) {
+      model=clean(model);
+      const m=model.match(/^(.*?)(\d+)$/);
+      if (!m) return model;
+      return m[1]+String(parseInt(m[2],10)+1).padStart(m[2].length,'0');
+    }
+
+    function nextAvailableModel(profileId, ignoreIndex=-1) {
+      const p=profileById(profileId);
+      let candidate=clean(p?.suggested_model);
+      if (!candidate) return '';
+      const used=new Set(rows.map((r,i)=>i===ignoreIndex?'':clean(r.model).toUpperCase()).filter(Boolean));
+      let guard=0;
+      while (used.has(candidate.toUpperCase()) && guard < 200) {
+        const next=incrementModel(candidate);
+        if (!next || next===candidate) break;
+        candidate=next; guard++;
+      }
+      return candidate;
+    }
+
+    function newRow() {
+      return {
+        company_profile:'', model:'', serial:'', stock:'', daterec:today(), cost:'', balance:'', rbvbook:'',
+        description:'', invoice:'', brand:'', category:'NONE', vendor:'', agent:'', bor:'NO',
+        rentalretail:'RENTAL', quantity:'1', store:'', retail:'', rto:'', _auto_model:true
+      };
+    }
+
+    function profileOptions(current) {
+      return '<option value="">— Choose company —</option>'+profiles.map(p=>`<option value="${esc(p.profile)}" ${p.profile===current?'selected':''}>${esc(p.label)}</option>`).join('');
+    }
+    function storeOptions(current) {
+      const seen=new Set();
+      let out='<option value="">— Select store —</option>';
+      for(const s of stores){ const id=storeId(s); if(!id||seen.has(id))continue; seen.add(id); out+=`<option value="${esc(id)}" ${id===clean(current)?'selected':''}>${esc(storeTitle(s))} · ${esc(id)}</option>`; }
+      if(current&&!seen.has(clean(current))) out+=`<option value="${esc(current)}" selected>Store ${esc(current)}</option>`;
+      return out;
+    }
+    function field(i,key,label,type='text',extra='') {
+      return `<label class="field"><span>${esc(label)}</span><input type="${type}" data-i="${i}" data-field="${esc(key)}" value="${esc(rows[i][key])}" ${extra}></label>`;
+    }
+    function textArea(i,key,label) {
+      return `<label class="field inventory-description"><span>${esc(label)}</span><textarea data-i="${i}" data-field="${esc(key)}" rows="3">${esc(rows[i][key])}</textarea></label>`;
+    }
+
+    function rowProblems(r,i) {
+      const p=[];
+      if(!clean(r.company_profile)) p.push('Company');
+      if(!clean(r.model)) p.push('Model');
+      if(!clean(r.serial)) p.push('Serial');
+      if(!clean(r.store)) p.push('Store');
+      if(clean(r.model).length>15) p.push('Model > 15 chars');
+      if(clean(r.serial).length>30) p.push('Serial > 30 chars');
+      if(clean(r.stock)&&!/^[0-9]+$/.test(clean(r.stock))) p.push('Stock must be numeric');
+      if(clean(r.model)&&clean(r.serial)) {
+        const pair=clean(r.model).toUpperCase()+'|'+clean(r.serial).toUpperCase();
+        if(existingPairs.has(pair)) p.push('Already in RTO inventory');
+        if(rows.some((x,j)=>j!==i&&clean(x.model).toUpperCase()===clean(r.model).toUpperCase()&&clean(x.serial).toUpperCase()===clean(r.serial).toUpperCase())) p.push('Duplicate in batch');
+      }
+      return [...new Set(p)];
+    }
+
+    function render() {
+      count.textContent=`${rows.length} inventory item${rows.length===1?'':'s'}`;
+      empty.classList.toggle('hidden', rows.length>0);
+      cards.innerHTML=rows.map((r,i)=>{
+        const p=profileById(r.company_profile);
+        const problems=rowProblems(r,i);
+        const latest=clean(p?.latest_model)||'—';
+        const suggested=nextAvailableModel(r.company_profile,i)||'—';
+        return `<article class="inventory-entry-card ${problems.length?'needs-review':'ready'}">
+          <header class="inventory-entry-head">
+            <div><span class="inventory-number">${i+1}</span><div><h2>${esc(p?.label || 'New inventory')}</h2><small>${clean(r.model)?`Model ${esc(r.model)}`:'Choose a company to get a model suggestion'}</small></div></div>
+            <div class="inventory-entry-actions"><span class="${problems.length?'inventory-needs':'inventory-ready'}">${problems.length?`${problems.length} needs review`:'Ready'}</span><button type="button" class="mini-btn discard-btn inventory-delete" data-i="${i}">Discard</button></div>
+          </header>
+          <div class="inventory-company-row">
+            <label class="field inventory-company"><span>Company / model series *</span><select class="inventory-profile" data-i="${i}">${profileOptions(r.company_profile)}</select></label>
+            <div class="model-readout"><span>Latest in RTO</span><strong>${esc(latest)}</strong></div>
+            <div class="model-readout next"><span>Suggested next</span><strong>${esc(suggested)}</strong>${suggested!=='—'?`<button type="button" class="chip use-next-model" data-i="${i}" data-value="${esc(suggested)}">Use</button>`:''}</div>
+          </div>
+          <div class="inventory-required-grid">
+            ${field(i,'model','Model *')}
+            ${field(i,'serial','Serial *')}
+            <label class="field"><span>Store *</span><select class="inventory-store" data-i="${i}">${storeOptions(r.store)}</select></label>
+            ${field(i,'stock','Stock #')}
+            ${field(i,'daterec','Date received')}
+          </div>
+          <div class="inventory-feature-row inventory-only-feature">
+            ${field(i,'category','Category')}
+            ${textArea(i,'description','Description')}
+          </div>
+          <div class="inventory-details-grid">
+            ${field(i,'brand','Brand')}
+            ${field(i,'vendor','Vendor')}
+            ${field(i,'agent','Agent')}
+            ${field(i,'invoice','Invoice #')}
+            ${field(i,'cost','Cost')}
+            ${field(i,'retail','Retail')}
+            ${field(i,'rto','RTO price')}
+            <label class="field"><span>Rental / Retail</span><select data-i="${i}" data-field="rentalretail"><option value="RENTAL" ${clean(r.rentalretail).toUpperCase()==='RENTAL'?'selected':''}>RENTAL</option><option value="RETAIL" ${clean(r.rentalretail).toUpperCase()==='RETAIL'?'selected':''}>RETAIL</option></select></label>
+            ${field(i,'quantity','Quantity','number','min="1" step="1"')}
+            <label class="field"><span>BOR</span><select data-i="${i}" data-field="bor"><option value="NO" ${clean(r.bor).toUpperCase()!=='YES'?'selected':''}>NO</option><option value="YES" ${clean(r.bor).toUpperCase()==='YES'?'selected':''}>YES</option></select></label>
+          </div>
+          <footer class="inventory-problem-footer">${problems.length?`Needs: ${esc(problems.join(' · '))}`:'Model/serial combination is ready for inventory import.'}</footer>
+        </article>`;
+      }).join('');
+      bind();
+    }
+
+    function applyProfile(i, profileId) {
+      const r=rows[i], p=profileById(profileId);
+      r.company_profile=profileId;
+      if(!p) return;
+      r.brand=clean(p.brand); r.vendor=clean(p.vendor);
+      if(clean(p.store)) r.store=clean(p.store);
+      r.agent=clean(p.agent)||agentForStore(r.store);
+      const next=nextAvailableModel(profileId,i);
+      if(next && (!clean(r.model) || r._auto_model)) { r.model=next; r._auto_model=true; }
+    }
+
+    function bind() {
+      document.querySelectorAll('[data-field]').forEach(el=>{
+        const event=el.tagName==='SELECT'?'change':'input';
+        el.addEventListener(event,e=>{
+          const i=+e.target.dataset.i, f=e.target.dataset.field;
+          rows[i][f]=e.target.value;
+          if(f==='model') rows[i]._auto_model=false;
+          if(['model','serial','stock'].includes(f)) renderValidation(false);
+        });
+      });
+      document.querySelectorAll('.inventory-profile').forEach(el=>el.addEventListener('change',e=>{ const i=+e.target.dataset.i; applyProfile(i,e.target.value); render(); }));
+      document.querySelectorAll('.inventory-store').forEach(el=>el.addEventListener('change',e=>{ const i=+e.target.dataset.i; rows[i].store=e.target.value; rows[i].agent=agentForStore(e.target.value); render(); }));
+      document.querySelectorAll('.use-next-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].model=btn.dataset.value; rows[i]._auto_model=true; render(); }));
+      document.querySelectorAll('.inventory-delete').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; if(confirm('Discard this inventory item from the batch?')){ rows.splice(i,1); render(); renderValidation(false); } }));
+    }
+
+    function renderValidation(show=true) {
+      const all=[]; rows.forEach((r,i)=>rowProblems(r,i).forEach(x=>all.push(`Item ${i+1}: ${x}`)));
+      if(!show){ validation.classList.add('hidden'); return all; }
+      validation.classList.remove('hidden','good','bad');
+      validation.classList.add(all.length?'bad':'good');
+      validation.textContent=all.length?all.join(' | '):`${rows.length} inventory item${rows.length===1?'':'s'} ready.`;
+      return all;
+    }
+
+    async function saveBatch(showAlert=true) {
+      const issues=renderValidation(true);
+      if(!rows.length){ if(showAlert) alert('Add at least one inventory item.'); return false; }
+      if(issues.length){ if(showAlert) alert('Fix the highlighted inventory fields before saving.'); return false; }
+      const res=await fetch(`/api/inventory/${window.INVENTORY_JOB}/save`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows})});
+      const data=await res.json().catch(()=>({ok:false,error:'Could not read server response.'}));
+      if(!res.ok||!data.ok){ alert(data.error||'Could not save inventory batch.'); return false; }
+      if(showAlert) alert(`Saved ${data.count} inventory item${data.count===1?'':'s'}.`);
+      return true;
+    }
+
+    function addRow(){ rows.push(newRow()); render(); setTimeout(()=>{ const last=document.querySelector('.inventory-entry-card:last-child'); if(last) last.scrollIntoView({behavior:'smooth',block:'center'}); },20); }
+    document.getElementById('addInventory').addEventListener('click',addRow);
+    document.getElementById('addInventoryEmpty').addEventListener('click',addRow);
+    document.getElementById('saveInventoryTop').addEventListener('click',()=>saveBatch(true));
+    document.getElementById('downloadInventory').addEventListener('click',async()=>{ if(await saveBatch(false)) location.href=`/inventory/${window.INVENTORY_JOB}/download`; });
+    document.getElementById('runInventory').addEventListener('click',async()=>{
+      if(!(await saveBatch(false))) return;
+      if(!confirm(`Import ${rows.length} inventory item${rows.length===1?'':'s'} into RTO Pro inventory?`)) return;
+      const form=document.createElement('form'); form.method='post'; form.action=`/inventory/${window.INVENTORY_JOB}/run-rto`; document.body.appendChild(form); form.submit();
+    });
+
+    render();
+  })();
+  </script>
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</body>
+</html>
