@@ -6,6 +6,16 @@ from typing import Any
 
 import fitz
 
+try:
+    from pypdf import PdfReader
+except Exception:  # optional fallback
+    PdfReader = None
+
+try:
+    import pdfplumber
+except Exception:  # optional fallback
+    pdfplumber = None
+
 
 SECTION_NAMES = {
     'customer information': 'customer',
@@ -267,12 +277,9 @@ def _extract_tables(doc: fitz.Document) -> list[tuple[str, list[tuple[str, str]]
     return result
 
 
-def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str, str]]]]:
-    # Fallback for PDFs whose borders are not detectable as tables. It recognizes
-    # the known section headings and both "Label Value" and alternating Label/Value
-    # text extraction orders.
-    text = '\n'.join(page.get_text('text') for page in doc)
-    lines = [_clean(x) for x in text.splitlines() if _clean(x)]
+def _extract_text_sections_from_text(text: str) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Parse known label/value sections from a raw text extraction."""
+    lines = [_clean(x) for x in str(text or '').splitlines() if _clean(x)]
     known_labels = {
         'name','mailing address','physical address','city state zip','cell phone','secondary phone','dob','ssn','dl','dl number','email','paperless bill email',
         'new or used','manufacturer','serial','serial number','model','model number','style','unit type','size','base color','trim color','roof color','cash price','description','side fees','unit options',
@@ -291,7 +298,6 @@ def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str
             buckets.setdefault(scope, [])
             i += 1
             continue
-        # Some headings include punctuation / casing around the section name.
         matched_section = next((v for k, v in SECTION_NAMES.items() if lk == _key(k)), None)
         if matched_section:
             scope = matched_section
@@ -299,9 +305,6 @@ def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str
             i += 1
             continue
 
-        # Alternating extraction: exact label on one line, value on the next.
-        # Do this BEFORE the inline matcher so labels such as "Agreement #" or
-        # "Serial #" are not misread as label="Agreement", value="#".
         if lk in known_labels and i + 1 < len(lines):
             nxt = lines[i + 1]
             nk = _key(nxt)
@@ -310,10 +313,9 @@ def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str
                 i += 2
                 continue
 
-        # Try "known label + value" on one line.
         matched = False
         for label in sorted(known_labels, key=len, reverse=True):
-            pattern = re.compile(r'^' + re.escape(label).replace(r'\ ', r'\s+') + r'\s*[:#-]?\s+(.+)$', re.I)
+            pattern = re.compile(r'^' + re.escape(label).replace(r'\\ ', r'\\s+') + r'\\s*[:#-]?\\s+(.+)$', re.I)
             m = pattern.match(line)
             if m and _clean(m.group(1)) and _clean(m.group(1)) not in {'#', ':', '-'}:
                 buckets.setdefault(scope, []).append((label, m.group(1)))
@@ -328,6 +330,270 @@ def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str
             result.append((s, pairs))
     return result
 
+
+def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str, str]]]]:
+    return _extract_text_sections_from_text('\n'.join(page.get_text('text') for page in doc))
+
+
+# Labels expected in each visual section.  This gives the parser a layout-aware
+# path that does not depend on PyMuPDF's table finder.  Real provider PDFs can
+# expose the visible table as loose positioned text rather than a true PDF table.
+_SPATIAL_LABELS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+    'customer': [
+        ('Name', ('Name',)), ('Mailing Address', ('Mailing Address',)),
+        ('Physical Address', ('Physical Address',)), ('City/State/Zip', ('City/State/Zip', 'City State Zip')),
+        ('Cell Phone', ('Cell Phone',)), ('Secondary Phone', ('Secondary Phone',)),
+        ('DOB', ('DOB',)), ('SSN', ('SSN',)), ('DL #', ('DL #', 'DL Number', 'DL')),
+        ('Email', ('Email',)), ('Paperless Bill Email', ('Paperless Bill Email',)),
+    ],
+    'unit': [
+        ('New or Used', ('New or Used',)), ('Manufacturer', ('Manufacturer',)),
+        ('Serial #', ('Serial #', 'Serial Number', 'Serial')), ('Model #', ('Model #', 'Model Number', 'Model')),
+        ('Style', ('Style',)), ('Unit Type', ('Unit Type',)), ('Size', ('Size',)),
+        ('Base Color', ('Base Color',)), ('Trim Color', ('Trim Color',)), ('Roof Color', ('Roof Color',)),
+        ('Cash Price', ('Cash Price',)), ('Description', ('Description',)), ('Side Fees', ('Side Fees',)),
+        ('Unit Options', ('Unit Options',)),
+    ],
+    'contract': [
+        ('90 Days SAC', ('90 Days SAC',)), ('Dealer', ('Dealer',)), ('Salesperson', ('Salesperson',)),
+        ('Agreement #', ('Agreement #', 'Agreement Number', 'Agreement')), ('RTO Terms', ('RTO Terms',)),
+        ('Contract Date', ('Contract Date',)), ('County of Delivery', ('County of Delivery',)),
+        ('City Tax', ('City Tax',)), ('County Tax', ('County Tax',)), ('Tax Code', ('Tax Code',)),
+        ('Total Tax', ('Total Tax',)), ('PMT Before Tax', ('PMT Before Tax',)), ('LDW', ('LDW',)),
+        ('Total Monthly PMT', ('Total Monthly PMT',)), ('Contract Price', ('Contract Price',)),
+        ('Cash Price', ('Cash Price',)), ('Security Deposit', ('Security Deposit',)),
+        ('Purchase Reserve', ('Purchase Reserve',)), ('Initial Payment Type', ('Initial Payment Type',)),
+        ('Auto Pay', ('Auto Pay',)), ('Paperless Billing', ('Paperless Billing',)), ('Order Type', ('Order Type',)),
+    ],
+    'corenter': [('Name', ('Name',)), ('Phone', ('Phone',)), ('DOB', ('DOB',)), ('Email', ('Email',))],
+    'ref1': [('Name', ('Name',)), ('Phone', ('Phone',)), ('Relationship', ('Relationship',)), ('Email', ('Email',))],
+    'ref2': [('Name', ('Name',)), ('Phone', ('Phone',)), ('Relationship', ('Relationship',)), ('Email', ('Email',))],
+    'employer': [
+        ('Name', ('Name', 'Employer Name')), ('Phone', ('Phone',)), ('Address', ('Address',)),
+        ('City/State/Zip', ('City/State/Zip', 'City State Zip')), ('Due Day of Month', ('Due Day of Month',)),
+    ],
+    'landlord': [
+        ('Name', ('Name',)), ('Phone', ('Phone',)), ('Address', ('Address',)),
+        ('City/State/Zip', ('City/State/Zip', 'City State Zip')), ('Customer Owns Land', ('Customer Owns Land',)),
+    ],
+}
+
+
+def _section_regions(page: fitz.Page) -> list[tuple[str, fitz.Rect]]:
+    """Locate the visible blue section headings and derive their column regions."""
+    hits: list[tuple[str, fitz.Rect, int]] = []
+    half = page.rect.width / 2.0
+    for heading, scope in SECTION_NAMES.items():
+        # Avoid duplicate aliases for the same printed heading where possible.
+        try:
+            rects = page.search_for(heading)
+        except Exception:
+            rects = []
+        for rect in rects:
+            col = 0 if ((rect.x0 + rect.x1) / 2.0) < half else 1
+            hits.append((scope, fitz.Rect(rect), col))
+    if not hits:
+        return []
+    # De-duplicate near-identical heading hits caused by aliases/case folding.
+    dedup: list[tuple[str, fitz.Rect, int]] = []
+    for scope, rect, col in sorted(hits, key=lambda x: (x[2], x[1].y0, x[1].x0)):
+        if any(s == scope and c == col and abs(r.y0 - rect.y0) < 3 for s, r, c in dedup):
+            continue
+        dedup.append((scope, rect, col))
+
+    regions: list[tuple[str, fitz.Rect]] = []
+    for col in (0, 1):
+        col_hits = [(s, r) for s, r, c in dedup if c == col]
+        col_hits.sort(key=lambda x: x[1].y0)
+        x0 = page.rect.x0 if col == 0 else half
+        x1 = half if col == 0 else page.rect.x1
+        for idx, (scope, rect) in enumerate(col_hits):
+            y0 = max(page.rect.y0, rect.y1 - 1)
+            y1 = col_hits[idx + 1][1].y0 - 1 if idx + 1 < len(col_hits) else page.rect.y1
+            if y1 > y0:
+                regions.append((scope, fitz.Rect(x0, y0, x1, y1)))
+    return regions
+
+
+def _same_line_value(page: fitz.Page, label_rect: fitz.Rect, region: fitz.Rect) -> str:
+    """Return text printed to the right of a label on the same visual row."""
+    cy = (label_rect.y0 + label_rect.y1) / 2.0
+    tol = max(5.0, label_rect.height * 0.72)
+    try:
+        words = page.get_text('words', clip=region) or []
+    except Exception:
+        words = []
+    vals = []
+    for w in words:
+        x0, y0, x1, y1, text = w[:5]
+        wy = (y0 + y1) / 2.0
+        if x0 >= label_rect.x1 - 0.5 and abs(wy - cy) <= tol:
+            vals.append((x0, _clean(text)))
+    vals.sort(key=lambda x: x[0])
+    value = _clean(' '.join(t for _, t in vals if t))
+    # search_for('Agreement #') / search_for('Model #') can occasionally match
+    # only the word part and leave the printed '#' as the first value token.
+    value = re.sub(r'^(?:#|:|-)\s*', '', value).strip()
+    return value
+
+
+def _extract_spatial_pairs(doc: fitz.Document) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Geometry-based reader for provider PDFs with positioned text but no table objects.
+
+    This is intentionally tried before table extraction.  It reads each label's
+    value from the same printed row inside its visual section, preventing the
+    left/right columns from being interleaved by the PDF text extractor.
+    """
+    out: list[tuple[str, list[tuple[str, str]]]] = []
+    for page in doc:
+        regions = _section_regions(page)
+        if not regions:
+            continue
+        for scope, region in regions:
+            specs = _SPATIAL_LABELS.get(scope, [])
+            if not specs:
+                continue
+            pairs: list[tuple[str, str]] = []
+            used_y: list[float] = []
+            for canonical, aliases in specs:
+                found_value = ''
+                found_rect = None
+                for alias in aliases:
+                    try:
+                        hits = page.search_for(alias)
+                    except Exception:
+                        hits = []
+                    for rect in hits:
+                        center = fitz.Point((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+                        if not region.contains(center):
+                            continue
+                        # Skip a hit if it is almost exactly the same baseline as
+                        # an already consumed alias for this canonical field.
+                        if any(abs(rect.y0 - y) < 2 for y in used_y):
+                            continue
+                        value = _same_line_value(page, rect, region)
+                        if value:
+                            found_value = value
+                            found_rect = rect
+                            break
+                    if found_value:
+                        break
+                if found_value:
+                    pairs.append((canonical, found_value))
+                    if found_rect is not None:
+                        used_y.append(found_rect.y0)
+            if pairs:
+                out.append((scope, pairs))
+    return out
+
+
+def _fallback_text_candidates(path: Path, doc: fitz.Document) -> list[tuple[str, str]]:
+    """Collect text using multiple PDF engines; different generators expose text differently."""
+    candidates: list[tuple[str, str]] = []
+    try:
+        text = '\n'.join(page.get_text('text', sort=True) for page in doc)
+        if _clean(text):
+            candidates.append(('PyMuPDF', text))
+    except Exception:
+        pass
+    try:
+        blocks = []
+        for page in doc:
+            for b in page.get_text('blocks', sort=True) or []:
+                if len(b) >= 5 and _clean(b[4]):
+                    blocks.append(_clean(b[4]))
+        text = '\n'.join(blocks)
+        if _clean(text):
+            candidates.append(('PyMuPDF blocks', text))
+    except Exception:
+        pass
+    if PdfReader is not None:
+        try:
+            reader = PdfReader(str(path))
+            text = '\n'.join((page.extract_text() or '') for page in reader.pages)
+            if _clean(text):
+                candidates.append(('pypdf', text))
+        except Exception:
+            pass
+    if pdfplumber is not None:
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                text = '\n'.join((page.extract_text(x_tolerance=2, y_tolerance=3) or '') for page in pdf.pages)
+            if _clean(text):
+                candidates.append(('pdfplumber', text))
+        except Exception:
+            pass
+    # Preserve unique candidates only.
+    uniq: list[tuple[str, str]] = []
+    seen = set()
+    for engine, text in candidates:
+        marker = _clean(text)
+        if marker and marker not in seen:
+            seen.add(marker)
+            uniq.append((engine, text))
+    return uniq
+
+
+def _text_quality(text: str) -> int:
+    t = _key(text)
+    score = min(len(t), 2000) // 20
+    for phrase in ('customer information','unit information','contract information','manufacturer','agreement','pmt before tax','rentabarn','choice capital'):
+        if phrase in t:
+            score += 100
+    return score
+
+
+def _extract_pdfplumber_tables(path: Path) -> list[tuple[str, list[tuple[str, str]]]]:
+    if pdfplumber is None:
+        return []
+    result: list[tuple[str, list[tuple[str, str]]]] = []
+    contact_index = 0
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
+                for raw in tables:
+                    matrix = [[_clean(x) for x in (row or [])] for row in (raw or [])]
+                    if not matrix:
+                        continue
+                    ncols = max((len(row) for row in matrix), default=0)
+                    if ncols <= 2:
+                        scope = _table_scope(matrix)
+                        pairs = _pairs_from_table(matrix)
+                        if scope == 'contact':
+                            contact_index += 1
+                            scope = 'ref1' if contact_index == 1 else 'ref2'
+                        if pairs:
+                            result.append((scope, pairs))
+                    else:
+                        # Pair columns independently to avoid left/right mixing.
+                        pair_count = (ncols + 1) // 2
+                        scopes = [''] * pair_count
+                        buckets: dict[str, list[tuple[str, str]]] = {}
+                        for raw_row in matrix:
+                            row = list(raw_row) + [''] * (ncols - len(raw_row))
+                            for pair_i in range(pair_count):
+                                li, vi = pair_i * 2, pair_i * 2 + 1
+                                label = _clean(row[li]) if li < len(row) else ''
+                                value = _clean(row[vi]) if vi < len(row) else ''
+                                for candidate in (label, value):
+                                    ck = _key(candidate)
+                                    if ck in SECTION_NAMES:
+                                        sc = SECTION_NAMES[ck]
+                                        if sc == 'contact':
+                                            contact_index += 1
+                                            sc = 'ref1' if contact_index == 1 else 'ref2'
+                                        scopes[pair_i] = sc
+                                        break
+                                if label and value and scopes[pair_i]:
+                                    buckets.setdefault(scopes[pair_i], []).append((label, value))
+                        result.extend((sc, pairs) for sc, pairs in buckets.items() if pairs)
+    except Exception:
+        return []
+    return result
 
 def _assign(fields: dict[str, dict[str, str]], scope: str, label: str, value: str) -> None:
     lk = _key(label)
@@ -364,11 +630,21 @@ def _sum_rates(*values: str) -> str:
 
 
 
-def _detect_pdf_provider(text: str) -> str:
+def _detect_pdf_provider(text: str, filename: str = '') -> str:
     compact = re.sub(r'[^a-z0-9]+', '', _clean(text).casefold())
     if 'choicecapital' in compact:
         return 'CHOICE CAPITAL'
     if 'rentabarn' in compact:
+        return 'RENTABARN'
+
+    # Some Choice Capital downloads render the provider/logo as artwork instead
+    # of selectable text. Their detailed-information filenames include the CF
+    # source token (e.g. PDF-01_CF_6-60376_DetailedInformationPage_...).
+    # Use this only as a fallback after inspecting the PDF text itself.
+    name = Path(str(filename or '')).name
+    if re.search(r'(?:^|[_\-])CF(?:[_\-]|$)', name, flags=re.I):
+        return 'CHOICE CAPITAL'
+    if re.search(r'(?:^|[_\-])RB(?:[_\-]|$)', name, flags=re.I) or 'rentabarn' in name.casefold():
         return 'RENTABARN'
     return ''
 
@@ -423,20 +699,27 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
     warnings: list[str] = []
     doc = fitz.open(path)
     try:
-        full_text = '\n'.join(page.get_text('text') for page in doc)
-        if not _clean(full_text):
-            raise ValueError('PDF has no selectable text. Export/download the original digital PDF instead of a scan or screenshot.')
-        if not _looks_supported(full_text):
-            raise ValueError('PDF is not recognized as the supported RentaBarn/Choice Capital-style contract format.')
+        text_candidates = _fallback_text_candidates(path, doc)
+        full_text = max(text_candidates, key=lambda x: _text_quality(x[1]))[1] if text_candidates else ''
 
-        pdf_provider = _detect_pdf_provider(full_text)
-        extracted = _extract_tables(doc)
-        if not extracted:
-            extracted = _extract_text_sections(doc)
-        else:
-            # Text fallback can recover cells table detection missed. Add it after
-            # table values so table extraction wins when both are present.
-            extracted += _extract_text_sections(doc)
+        # V7.11: geometry first.  A real browser-generated provider PDF may have
+        # perfectly selectable text yet expose no usable table structure.
+        extracted = _extract_spatial_pairs(doc)
+        extracted += _extract_tables(doc)
+        extracted += _extract_pdfplumber_tables(path)
+        for _engine, candidate_text in text_candidates:
+            extracted += _extract_text_sections_from_text(candidate_text)
+
+        if not extracted and not _clean(full_text):
+            raise ValueError('PDF reader could not extract text from this file. It may be an image-only/scanned PDF; please upload the original downloaded PDF.')
+
+        # Do not reject solely on one engine's raw-text signature anymore.
+        # Accept when the spatial/table readers find recognizable form labels.
+        recognized_pairs = sum(len(pairs) for scope, pairs in extracted if scope in SECTION_NAMES.values())
+        if not _looks_supported(full_text) and recognized_pairs < 4:
+            raise ValueError('PDF text was found, but the provider form fields could not be recognized. Upload the original RentaBarn/Choice Capital detailed-information PDF.')
+
+        pdf_provider = _detect_pdf_provider(full_text, path.name)
 
         fields: dict[str, dict[str, str]] = {}
         for scope, pairs in extracted:
@@ -632,6 +915,7 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
 
         metadata = {
             'provider': (pdf_provider.title() + ' PDF') if pdf_provider else 'Contract PDF',
+            'reader_engines': ', '.join(engine for engine, _ in text_candidates) or 'PyMuPDF spatial',
             'filename': path.name,
             'agreement': agreement,
             'manufacturer_original': manufacturer_raw,

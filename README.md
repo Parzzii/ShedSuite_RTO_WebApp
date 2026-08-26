@@ -1,3 +1,7 @@
+## V7.11 PDF reader reliability rebuild
+
+See `README_V7.11.txt` for the multi-engine/spatial PDF-reader update.
+
 ## V7.10 PDF/store/dealer/payment correction
 
 See `README_V7.10.txt` for the new PDF store, dealer, zone, rental-rate, and restored comment behavior.
