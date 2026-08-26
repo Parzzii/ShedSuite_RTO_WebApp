@@ -1,3 +1,9 @@
+## V7.9 phone + customer-comment correction
+
+- RTO `PHONE5` (Other phone) is explicitly exported with `CELLOPT2=3`, which RTO Pro documents as **cell number + opted out of SMS**.
+- The generated `OTHER IS ...` note is no longer sent through the import `COMMENTS` field. It is kept as customer-comment metadata and, after **Refresh RTO Data** finds the RTO account, is written to the normal `CUSTOMERS.COMMENTS` field (the comment box under Directions). Existing unrelated customer comments are preserved.
+- The review UI shows that customer comment directly below Directions and shows its sync status.
+
 
 ## V7.2 live Delivery Certificate coordinates
 

@@ -259,6 +259,11 @@
     return `<label class="field ${opts.wide?'wide-field':''}"><span>${esc(label)}</span><input data-i="${i}" data-helper="${esc(helper)}" value="${esc(val)}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}>${opts.small?`<small>${esc(opts.small)}</small>`:''}</label>`;
   }
 
+  function helperTextarea(i, helper, label, opts={}) {
+    const val=clean(rows[i][helper]);
+    return `<label class="field textarea-field ${opts.wide?'wide-field':''}"><span>${esc(label)}</span><textarea data-i="${i}" data-helper="${esc(helper)}" rows="${opts.rows || 3}">${esc(val)}</textarea>${opts.small?`<small>${esc(opts.small)}</small>`:''}</label>`;
+  }
+
   function textareaField(i, field, label, opts={}) {
     return `<label class="field textarea-field ${opts.wide?'wide-field':''}"><span>${esc(label)}</span><textarea data-i="${i}" data-field="${field}" rows="${opts.rows || 3}">${esc(rows[i][field])}</textarea>${opts.small?`<small>${esc(opts.small)}</small>`:''}</label>`;
   }
@@ -355,13 +360,12 @@
           ${inputField(i,'CELL','Primary phone',{emphasis:true})}
           ${helperField(i,'_secondary_phone','Secondary phone')}
           <label class="field emphasis"><span>Selected “Other” source</span><select class="phone-source-select" data-i="${i}">${phoneSourceOptions(r)}</select><small>${r._phone_other_manual?'Manual override':'Automatic rule'}</small></label>
-          ${inputField(i,'PHONE5','RTO Other phone',{emphasis:true})}
+          ${inputField(i,'PHONE5','RTO Other phone',{emphasis:true,small:clean(r.PHONE5)?'SMS texting: OPTED OUT (RTO CELLOPT2 = 3)':'No Other phone selected'})}
         </div>
         <div class="reference-grid">
           <div class="reference-card"><strong>Reference 1</strong><div class="mapping-grid ref-fields">${inputField(i,'REFERENCE1','Name')}${inputField(i,'REFRELATION1','Relationship')}${inputField(i,'REFPHONE1','Phone')}</div></div>
           <div class="reference-card"><strong>Reference 2</strong><div class="mapping-grid ref-fields">${inputField(i,'REFERENCE2','Name')}${inputField(i,'REFRELATION2','Relationship')}${inputField(i,'REFPHONE2','Phone')}</div></div>
         </div>
-        ${textareaField(i,'COMMENTS','Comment box',{rows:2,wide:true,small:'Automatically says OTHER IS + relationship + name when Ref 1 or Ref 2 is selected.'})}
       </section>
     </div>`;
   }
@@ -584,6 +588,7 @@
         <div class="pdf-payment-note">RTO Pro receives the item rental rate in RATE1, LDW separately in GRP, and calculates the taxed monthly total. PMT is intentionally 0.00 when inventory RATE1 is supplied.</div>
       </section>`:''}
       ${textareaField(i,'DIRECTIONS','Directions / coordinates',{rows:4,wide:true})}
+      ${helperTextarea(i,'_customer_comment','Customer comment (below Directions in RTO Pro)',{rows:2,wide:true,small:clean(r._customer_comment_sync_status)?r._customer_comment_sync_status:'The OTHER IS note is synced to the normal RTO customer comment after Refresh RTO Data.'})}
       <div class="pdf-note">The Invoice PDF is now always included in the download set because that is where ShedSuite commonly stores the <strong>Agent:</strong> field.</div>
     </div>`;
   }
@@ -767,7 +772,10 @@
     if (source==='ref1') r.PHONE5=clean(r.REFPHONE1);
     else if (source==='ref2') r.PHONE5=clean(r.REFPHONE2);
     else r.PHONE5=clean(r._secondary_phone);
-    r.COMMENTS=phoneCommentFor(r,source);
+    r.CELLOPT2=clean(r.PHONE5)?'3':'';
+    r._customer_comment=phoneCommentFor(r,source);
+    r._customer_comment_sync_status='Waiting for RTO account';
+    if (/^OTHER\s+IS\b/i.test(clean(r.COMMENTS))) r.COMMENTS='';
   }
 
   function applyPhoneRule(i, forceAuto=false) {
@@ -935,7 +943,7 @@
         const i=+e.target.dataset.i; setUsedSuffix(i,e.target.value); render();
       });
     });
-    document.querySelectorAll('input[data-helper]').forEach(el=>{
+    document.querySelectorAll('input[data-helper], textarea[data-helper]').forEach(el=>{
       el.addEventListener('input',e=>{
         const i=+e.target.dataset.i; rows[i][e.target.dataset.helper]=e.target.value;
         if (e.target.dataset.helper==='_secondary_phone') applyPhoneRule(i,false);

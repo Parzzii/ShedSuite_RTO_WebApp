@@ -748,8 +748,10 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
             'EMAIL': clean_text(src.get('Customer Email')).lower(),
             'WORK1': clean_text(src.get('Customer Employer Name')),
             'WORKPH1': clean_text(src.get('Customer Employer Phone')),
-            'CELLOPT': '2' if name else '',
-            'CELLOPT2': '3',
+            # RTO Pro manual: CELLOPT=2 means primary cell opted in.
+            # CELLOPT2=3 means PHONE5 is a cell number and is opted OUT of SMS.
+            'CELLOPT': '2' if phone(src.get('Primary Phone')) else '',
+            'CELLOPT2': '3' if p5 else '',
             'COUNTY': county,
             'REFERENCE1': clean_text(src.get('Ref 1 Name')).upper(),
             'REFRELATION1': clean_text(src.get('Ref 1 Relationship')).upper(),
@@ -790,7 +792,11 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
             'AGENT1': agent,
             'CATEGORY1': category_for(src, categories),
             'RETAIL1': numstr(src.get('Building Cost')) if parse_money(src.get('Building Cost')) else '',
-            'COMMENTS': comment,
+            # Do not send the generated OTHER IS note through the CSV COMMENTS
+            # field.  RTO Pro displays that as an application comment on the
+            # pending-app screen.  V7.9 keeps it as customer-comment metadata
+            # and syncs it to CUSTOMERS.COMMENTS after the account is created.
+            'COMMENTS': '',
             'CONDITION1': '',
         })
 
@@ -839,6 +845,8 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
             '_ref2_phone': phone(src.get('Ref 2 Phone')),
             '_phone_other_source': phone_source,
             '_phone_other_manual': False,
+            '_customer_comment': comment,
+            '_customer_comment_sync_status': 'Waiting for RTO account',
             '_ziptax_county': clean_text(tax_detail.get('county')).upper(),
             '_ziptax_city': clean_text(tax_detail.get('city')).upper(),
             '_ziptax_incorporated': tax_detail.get('incorporated') if 'incorporated' in tax_detail else None,

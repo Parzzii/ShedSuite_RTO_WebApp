@@ -1155,6 +1155,129 @@ def _open_rto_connection(dsn: str, user: str, password: str):
     return pyodbc.connect(';'.join(parts) + ';', timeout=15)
 
 
+def _prepare_phone_and_customer_comment(row: dict) -> None:
+    """Keep SMS flags and the generated OTHER IS note in the intended places.
+
+    RTO Pro documents CELLOPT2=3 as: PHONE5 is a cell number and is opted out
+    of SMS.  The generated OTHER IS note is intentionally kept out of the
+    import COMMENTS field because that field is shown as an application comment
+    during pending-web-application review.
+    """
+    other_phone = phone(row.get('PHONE5', ''))
+    row['PHONE5'] = other_phone
+    row['CELLOPT2'] = '3' if other_phone else ''
+
+    primary_phone = phone(row.get('CELL', ''))
+    row['CELL'] = primary_phone
+    if primary_phone and not str(row.get('CELLOPT', '') or '').strip():
+        row['CELLOPT'] = '2'
+
+    app_comment = str(row.get('COMMENTS', '') or '').strip()
+    customer_comment = str(row.get('_customer_comment', '') or '').strip()
+    if not customer_comment and re.match(r'^OTHER\s+IS\b', app_comment, flags=re.I):
+        row['_customer_comment'] = app_comment
+        customer_comment = app_comment
+    if customer_comment and re.match(r'^OTHER\s+IS\b', app_comment, flags=re.I):
+        row['COMMENTS'] = ''
+
+
+def _normal_customer_comment(existing: str, generated: str) -> str:
+    """Merge our generated OTHER IS note without destroying existing comments."""
+    existing = re.sub(r'\s+', ' ', str(existing or '')).strip()
+    generated = re.sub(r'\s+', ' ', str(generated or '')).strip()
+    if not generated:
+        return existing
+    if generated.casefold() in existing.casefold():
+        return existing
+
+    # Replace only an older generated OTHER IS segment. Preserve unrelated notes.
+    parts = [x.strip() for x in existing.split('|') if x.strip()]
+    parts = [x for x in parts if not re.match(r'^OTHER\s+IS\b', x, flags=re.I)]
+    parts.append(generated)
+    return ' | '.join(parts)
+
+
+def sync_customer_comments_to_rto(
+    dsn: str, user: str, password: str, rows: list[dict]
+) -> dict:
+    """Write generated OTHER IS notes to the normal RTO customer comment field.
+
+    RTO Pro's documented import field COMMENTS is used on the pending application
+    screen.  Once the import has assigned an ACCOUNT, this routine updates the
+    normal CUSTOMERS.COMMENTS field so the note appears with customer maintenance
+    directly below Directions.
+    """
+    targets = [
+        r for r in rows
+        if str(r.get('_customer_comment', '') or '').strip()
+        and str(r.get('ACCOUNT', '') or '').strip()
+    ]
+    if not targets:
+        return {'synced': 0, 'skipped': 0, 'errors': []}
+
+    conn = _open_rto_connection(dsn, user, password)
+    synced = 0
+    skipped = 0
+    errors: list[str] = []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+            "WHERE RDB$RELATION_NAME='CUSTOMERS'"
+        )
+        columns = {str(x[0] or '').strip().upper() for x in cur.fetchall()}
+        if 'COMMENTS' not in columns:
+            raise RuntimeError('RTO CUSTOMERS table does not expose a COMMENTS field.')
+
+        for row in targets:
+            account = str(row.get('ACCOUNT', '') or '').strip()
+            store = str(row.get('STORE', '') or '').strip()
+            generated = str(row.get('_customer_comment', '') or '').strip()
+            name = str(row.get('NAME', '') or account).strip()
+            try:
+                if store and 'STORE' in columns:
+                    cur.execute(
+                        'SELECT COMMENTS FROM CUSTOMERS WHERE ACCOUNT=? AND STORE=?',
+                        account, store,
+                    )
+                else:
+                    cur.execute('SELECT COMMENTS FROM CUSTOMERS WHERE ACCOUNT=?', account)
+                rec = cur.fetchone()
+                if rec is None:
+                    skipped += 1
+                    row['_customer_comment_sync_status'] = 'RTO customer not found yet'
+                    continue
+
+                existing = '' if rec[0] is None else str(rec[0]).strip()
+                merged = _normal_customer_comment(existing, generated)
+                if merged != existing:
+                    if store and 'STORE' in columns:
+                        cur.execute(
+                            'UPDATE CUSTOMERS SET COMMENTS=? WHERE ACCOUNT=? AND STORE=?',
+                            merged, account, store,
+                        )
+                    else:
+                        cur.execute(
+                            'UPDATE CUSTOMERS SET COMMENTS=? WHERE ACCOUNT=?',
+                            merged, account,
+                        )
+                row['_customer_comment_sync_status'] = 'Synced to RTO customer comments'
+                synced += 1
+            except Exception as exc:
+                row['_customer_comment_sync_status'] = 'Comment sync failed'
+                errors.append(f'{name}: {exc}')
+        conn.commit()
+        return {'synced': synced, 'skipped': skipped, 'errors': errors}
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def fetch_rto_contract_accounts(dsn: str, user: str, password: str) -> list[tuple[str, str]]:
     """Read the same contracts data that the Excel ExistingContracts query uses."""
     conn = _open_rto_connection(dsn, user, password)
@@ -1252,6 +1375,10 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
             r['_rto_contract_found'] = matched_contract
             matched += 1
 
+    # V7.9: the generated OTHER IS note belongs in the normal customer comment
+    # field below Directions, not in the pending application's comments box.
+    comment_sync = sync_customer_comments_to_rto(dsn, user, password, rows)
+
     save_job_rows(jp, rows)
 
     (jp / 'last_rto_refresh.json').write_text(
@@ -1269,6 +1396,9 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
     return {
         'contracts_read': len(contract_accounts),
         'accounts_matched': matched,
+        'customer_comments_synced': int(comment_sync.get('synced', 0)),
+        'customer_comments_skipped': int(comment_sync.get('skipped', 0)),
+        'customer_comment_errors': list(comment_sync.get('errors', [])),
         'refs': refs,
     }
 
@@ -1464,7 +1594,7 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
       <form method="post"
             action="{url_for('refresh_rto', job=job)}">
         <button class="workflow-button workflow-refresh" type="submit">
-          2. Refresh RTO Data
+          2. Refresh RTO Data + Sync Comment
         </button>
       </form>
 
@@ -1485,7 +1615,8 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
     <div class="workflow-help">
       After RTO Pro shows its successful import confirmation, click
       <b>Refresh RTO Data</b>. That reads the updated Firebird tables,
-      fills assigned account numbers, and refreshes last-used model numbers.
+      fills assigned account numbers, refreshes last-used model numbers, and syncs the
+      <b>OTHER IS...</b> note into the normal customer comment box below Directions.
       Then click <b>Import PDFs to RTO Imaging</b>.
     </div>
   </div>
@@ -2118,6 +2249,8 @@ def _ensure_row_uids(rows: list[dict]) -> bool:
 
 
 def save_job_rows(jp: Path, rows: list[dict]):
+    for row in rows:
+        _prepare_phone_and_customer_comment(row)
     _ensure_row_uids(rows)
     # V7 serializes writes with the certificate worker so edits and background
     # PDF completion cannot overwrite one another.
@@ -3119,6 +3252,7 @@ def save(job):
             r[phone_field] = phone(r.get(phone_field, ''))
         if '_secondary_phone' in r:
             r['_secondary_phone'] = phone(r.get('_secondary_phone', ''))
+        _prepare_phone_and_customer_comment(r)
 
         # Save UI helper metadata as well.
         for k in [
@@ -3512,10 +3646,16 @@ def refresh_rto(job):
         flash(
             f"RTO data refreshed: "
             f"{result['contracts_read']} contracts read; "
-            f"{result['accounts_matched']} account number(s) matched. "
+            f"{result['accounts_matched']} account number(s) matched; "
+            f"{result.get('customer_comments_synced', 0)} customer comment(s) synced. "
             "Last-used model numbers were refreshed from Firebird.",
             'ok',
         )
+        if result.get('customer_comment_errors'):
+            flash(
+                'Customer comment sync warnings: ' + ' | '.join(result['customer_comment_errors'][:6]),
+                'error',
+            )
 
     except Exception as e:
         flash(
