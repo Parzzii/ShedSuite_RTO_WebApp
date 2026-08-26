@@ -9,11 +9,14 @@
   const searchInput = document.getElementById('searchInput');
   const onlyNeeds = document.getElementById('onlyNeeds');
   const validationBanner = document.getElementById('validationBanner');
+  const sortStatus = document.getElementById('sortStatus');
   const allFieldsDialog = document.getElementById('allFieldsDialog');
   const allFieldsGrid = document.getElementById('allFieldsGrid');
   const sourceDialog = document.getElementById('sourceDialog');
   const sourceGrid = document.getElementById('sourceGrid');
   const activeTabs = {};
+  const collapsedRows = new Set();
+  let reorderBusy = false;
   let editingIndex = null;
   let allFieldDraft = null;
   let deliveryStatus = {items:{}, counts:{}, active:false, complete:false};
@@ -22,6 +25,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
   const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   const clean = (s) => String(s ?? '').trim();
+  const rowUid = (r, i='') => clean(r && r._row_uid) || `legacy-${i}-${clean(r && r._source_order_id)}-${clean(r && r.SERIAL1)}`;
   const digits = (s) => String(s ?? '').replace(/\D/g, '');
   const phoneDigits = (s) => {
     let d=digits(s);
@@ -578,19 +582,39 @@
 
   function buildCard(r,i) {
     const probs=rowProblems(r); const needs=probs.length>0;
-    const tab=activeTabs[i] || 'mapping';
+    const uid=rowUid(r,i);
+    const tab=activeTabs[uid] || 'mapping';
+    const collapsed=collapsedRows.has(uid);
+    const canSort=reorderingAllowed();
     const warningHtml=Array.isArray(r._warnings) && r._warnings.length ? `<details class="row-warnings"><summary>${r._warnings.length} original check${r._warnings.length===1?'':'s'}</summary>${r._warnings.map(x=>`<div>${esc(x)}</div>`).join('')}</details>` : '';
-    return `<article class="contract-card ${needs?'needs-review':'ready'}" data-index="${i}">
+    const body = collapsed ? '' : `
+      <div class="contract-body">
+        <div class="source-strip"><span class="source-label">${clean(r._source_type)==='pdf'?'PDF dealer':'ShedSuite dealer'}</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
+        <nav class="card-tabs" aria-label="Contract sections">
+          ${[['mapping','Mapping'],['inventory','Inventory'],['customer','Customer'],['tax','Tax & Address'],['pdf','PDF / Agent']].map(([v,l])=>`<button type="button" class="card-tab ${tab===v?'active':''}" data-i="${i}" data-tab="${v}">${l}</button>`).join('')}
+        </nav>
+        <div class="card-tab-content">${tabContent(r,i,tab)}</div>
+        <div class="card-foot"><span class="problem-text">${needs?`Needs: ${esc(probs.join(', '))}`:'✓ Required mapping fields are filled'}</span></div>
+      </div>`;
+    return `<article class="contract-card ${needs?'needs-review':'ready'} ${collapsed?'collapsed':''}" data-index="${i}" data-uid="${esc(uid)}">
       <header class="contract-header">
-        <div class="contract-identity"><span class="status-dot"></span><div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>${clean(r._source_type)==='pdf'?'Agreement':'Order'} <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span><span class="source-type-badge ${clean(r._source_type)==='pdf'?'pdf':'csv'}">${clean(r._source_type)==='pdf'?'PDF':'CSV'}</span></div></div></div>
-        <div class="contract-header-actions">${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}${certChip(r)}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button><button type="button" class="mini-btn discard-btn" data-i="${i}" title="Remove this contract from the current import">Discard</button></div>
+        <div class="contract-header-main">
+          <button type="button" class="drag-handle" data-uid="${esc(uid)}" draggable="${canSort?'true':'false'}" ${canSort?'':'disabled'} title="${canSort?'Drag to reorder':'Clear search/filter to reorder'}" aria-label="Drag ${esc(r.NAME || 'contract')} to reorder">⠿</button>
+          <button type="button" class="contract-identity contract-collapse-toggle" data-i="${i}" data-uid="${esc(uid)}" aria-expanded="${collapsed?'false':'true'}" title="${collapsed?'Expand contract':'Collapse contract'}">
+            <span class="status-dot"></span>
+            <div><h2>${esc(r.NAME || 'Unnamed')}</h2><div class="identity-meta"><span>${clean(r._source_type)==='pdf'?'Agreement':'Order'} <strong>${esc(r._source_order_id)}</strong></span><span>Serial <strong>${esc(r.SERIAL1)}</strong></span><span>${esc(r._source_company)}</span><span class="source-type-badge ${clean(r._source_type)==='pdf'?'pdf':'csv'}">${clean(r._source_type)==='pdf'?'PDF':'CSV'}</span></div></div>
+            <span class="collapse-chevron" aria-hidden="true">${collapsed?'▾':'▴'}</span>
+          </button>
+        </div>
+        <div class="contract-header-actions">
+          <div class="sort-step-controls" aria-label="Move contract">
+            <button type="button" class="mini-btn sort-step sort-up" data-uid="${esc(uid)}" ${!canSort || i===0?'disabled':''} title="Move up" aria-label="Move ${esc(r.NAME || 'contract')} up">↑</button>
+            <button type="button" class="mini-btn sort-step sort-down" data-uid="${esc(uid)}" ${!canSort || i===rows.length-1?'disabled':''} title="Move down" aria-label="Move ${esc(r.NAME || 'contract')} down">↓</button>
+          </div>
+          ${boolish(r._used_building)?'<span class="used-header-tag">USED BUILDING</span>':(boolish(r._used_detected)?'<span class="used-header-tag detected">USED DETECTED</span>':'')}${certChip(r)}<span class="state-chip">${esc(r.del_state || r._source_state)}</span><button type="button" class="mini-btn source-btn" data-i="${i}">Source row</button><button type="button" class="mini-btn all-btn" data-i="${i}">All RTO fields</button><button type="button" class="mini-btn discard-btn" data-i="${i}" data-uid="${esc(uid)}" title="Remove this contract from the current import">Discard</button>
+        </div>
       </header>
-      <div class="source-strip"><span class="source-label">${clean(r._source_type)==='pdf'?'PDF dealer':'ShedSuite dealer'}</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
-      <nav class="card-tabs" aria-label="Contract sections">
-        ${[['mapping','Mapping'],['inventory','Inventory'],['customer','Customer'],['tax','Tax & Address'],['pdf','PDF / Agent']].map(([v,l])=>`<button type="button" class="card-tab ${tab===v?'active':''}" data-i="${i}" data-tab="${v}">${l}</button>`).join('')}
-      </nav>
-      <div class="card-tab-content">${tabContent(r,i,tab)}</div>
-      <div class="card-foot"><span class="problem-text">${needs?`Needs: ${esc(probs.join(', '))}`:'✓ Required mapping fields are filled'}</span></div>
+      ${body}
     </article>`;
   }
 
@@ -606,6 +630,77 @@
     return out;
   }
 
+  function reorderingAllowed() {
+    return !reorderBusy && !clean(searchInput.value) && !onlyNeeds.checked;
+  }
+
+  function setSortStatus(text, state='') {
+    if (!sortStatus) return;
+    sortStatus.textContent=text;
+    sortStatus.classList.remove('saving','saved','error');
+    if (state) sortStatus.classList.add(state);
+  }
+
+  async function applyReorder(desiredRows, desiredSources) {
+    if (reorderBusy) return false;
+    reorderBusy=true;
+    setSortStatus('Saving order…','saving');
+    // Keep the current DOM/order until the server confirms. This prevents any
+    // index-based legacy action from pointing at a different server row.
+    render();
+    try {
+      const resp=await fetch(`/api/reorder/${encodeURIComponent(window.RTO_JOB)}`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({order:desiredRows.map((r,i)=>rowUid(r,i))})
+      });
+      const data=await resp.json().catch(()=>({}));
+      if (!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      rows.splice(0,rows.length,...desiredRows);
+      if (Array.isArray(sources)) sources.splice(0,sources.length,...desiredSources);
+      reorderBusy=false;
+      setSortStatus('Order saved ✓','saved');
+      render();
+      window.setTimeout(()=>{ if (!reorderBusy) setSortStatus('Drag ⠿ to reorder'); },1800);
+      return true;
+    } catch (e) {
+      reorderBusy=false;
+      setSortStatus(`Order not saved: ${e.message || e}`,'error');
+      render();
+      return false;
+    }
+  }
+
+  async function moveRowTo(sourceUid, targetUid, after=false) {
+    if (!reorderingAllowed()) return;
+    const from=rows.findIndex((r,i)=>rowUid(r,i)===sourceUid);
+    let target=rows.findIndex((r,i)=>rowUid(r,i)===targetUid);
+    if (from<0 || target<0 || from===target) return;
+
+    const desiredRows=[...rows];
+    const desiredSources=[...sources];
+    const [row]=desiredRows.splice(from,1);
+    const [src]=desiredSources.splice(from,1);
+    if (from<target) target-=1;
+    let insertAt=target+(after?1:0);
+    insertAt=Math.max(0,Math.min(desiredRows.length,insertAt));
+    desiredRows.splice(insertAt,0,row);
+    desiredSources.splice(insertAt,0,src);
+    await applyReorder(desiredRows,desiredSources);
+  }
+
+  async function moveRowByStep(uid, delta) {
+    if (!reorderingAllowed()) return;
+    const from=rows.findIndex((r,i)=>rowUid(r,i)===uid);
+    const to=from+delta;
+    if (from<0 || to<0 || to>=rows.length) return;
+    const desiredRows=[...rows];
+    const desiredSources=[...sources];
+    [desiredRows[from],desiredRows[to]]=[desiredRows[to],desiredRows[from]];
+    [desiredSources[from],desiredSources[to]]=[desiredSources[to],desiredSources[from]];
+    await applyReorder(desiredRows,desiredSources);
+  }
+
   function updateStats() {
     const needs=rows.filter(r=>rowProblems(r).length).length;
     document.getElementById('needsCount').textContent=needs;
@@ -616,6 +711,10 @@
     const idxs=visibleIndexes();
     cards.innerHTML=idxs.length ? idxs.map(i=>buildCard(rows[i],i)).join('') : '<div class="empty-state">No contracts match the current filter.</div>';
     updateStats();
+    if (!reorderBusy) {
+      if (clean(searchInput.value) || onlyNeeds.checked) setSortStatus('Clear search/filter to reorder');
+      else if (!sortStatus?.classList.contains('saved') && !sortStatus?.classList.contains('error')) setSortStatus('Drag ⠿ to reorder');
+    }
     bindCardEvents();
   }
 
@@ -699,19 +798,10 @@
     }
   }
 
-  function shiftTabsAfterDiscard(removedIndex) {
-    const entries=Object.entries(activeTabs);
-    Object.keys(activeTabs).forEach(k=>delete activeTabs[k]);
-    for (const [rawIndex,tab] of entries) {
-      const idx=Number(rawIndex);
-      if (idx<removedIndex) activeTabs[idx]=tab;
-      else if (idx>removedIndex) activeTabs[idx-1]=tab;
-    }
-  }
-
   async function discardContract(i, button) {
     const r=rows[i];
     if (!r) return;
+    const uid=rowUid(r,i);
     const label=clean(r.NAME) || `Row ${i+1}`;
     const order=clean(r._source_order_id);
     const prompt=`Discard ${label}${order?` (Order ${order})`:''}?\n\nThis removes it from this import and rebuilds the RTO files. It does not delete anything from ShedSuite.`;
@@ -721,13 +811,14 @@
     button.disabled=true;
     button.textContent='Discarding…';
     try {
-      const resp=await fetch(`/api/discard/${encodeURIComponent(window.RTO_JOB)}/${i}`,{method:'POST'});
+      const resp=await fetch(`/api/discard-row/${encodeURIComponent(window.RTO_JOB)}/${encodeURIComponent(uid)}`,{method:'POST'});
       const data=await resp.json().catch(()=>({}));
       if (!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
       rows.splice(i,1);
       if (Array.isArray(sources)) sources.splice(i,1);
-      shiftTabsAfterDiscard(i);
+      delete activeTabs[uid];
+      collapsedRows.delete(uid);
       validationBanner.classList.remove('hidden','bad');
       validationBanner.classList.add('good');
       validationBanner.innerHTML=`<strong>${esc(data.removed || label)} discarded.</strong> ${esc(data.remaining)} contract${Number(data.remaining)===1?'':'s'} remain. RTO CSV/XML/ZIP were rebuilt.`;
@@ -750,8 +841,55 @@
   }
 
   function bindCardEvents() {
+    document.querySelectorAll('.contract-collapse-toggle').forEach(btn=>btn.addEventListener('click',()=>{
+      const uid=btn.dataset.uid;
+      if (collapsedRows.has(uid)) collapsedRows.delete(uid); else collapsedRows.add(uid);
+      render();
+    }));
+
+    document.querySelectorAll('.sort-up').forEach(btn=>btn.addEventListener('click',()=>moveRowByStep(btn.dataset.uid,-1)));
+    document.querySelectorAll('.sort-down').forEach(btn=>btn.addEventListener('click',()=>moveRowByStep(btn.dataset.uid,1)));
+
+    let draggedUid='';
+    document.querySelectorAll('.drag-handle').forEach(handle=>{
+      handle.addEventListener('dragstart',e=>{
+        if (!reorderingAllowed()) { e.preventDefault(); return; }
+        draggedUid=handle.dataset.uid;
+        e.dataTransfer.effectAllowed='move';
+        e.dataTransfer.setData('text/plain',draggedUid);
+        handle.closest('.contract-card')?.classList.add('dragging');
+      });
+      handle.addEventListener('dragend',()=>{
+        draggedUid='';
+        document.querySelectorAll('.contract-card').forEach(card=>card.classList.remove('dragging','drag-over-before','drag-over-after'));
+      });
+    });
+    document.querySelectorAll('.contract-card').forEach(card=>{
+      card.addEventListener('dragover',e=>{
+        if (!draggedUid || !reorderingAllowed() || card.dataset.uid===draggedUid) return;
+        e.preventDefault();
+        const rect=card.getBoundingClientRect();
+        const after=e.clientY > rect.top + rect.height/2;
+        card.classList.toggle('drag-over-before',!after);
+        card.classList.toggle('drag-over-after',after);
+      });
+      card.addEventListener('dragleave',e=>{
+        if (!card.contains(e.relatedTarget)) card.classList.remove('drag-over-before','drag-over-after');
+      });
+      card.addEventListener('drop',e=>{
+        if (!draggedUid || !reorderingAllowed() || card.dataset.uid===draggedUid) return;
+        e.preventDefault();
+        const rect=card.getBoundingClientRect();
+        const after=e.clientY > rect.top + rect.height/2;
+        const source=draggedUid;
+        draggedUid='';
+        card.classList.remove('drag-over-before','drag-over-after');
+        moveRowTo(source,card.dataset.uid,after);
+      });
+    });
+
     document.querySelectorAll('.card-tab').forEach(btn=>btn.addEventListener('click',()=>{
-      activeTabs[+btn.dataset.i]=btn.dataset.tab; render();
+      const i=+btn.dataset.i; activeTabs[rowUid(rows[i],i)]=btn.dataset.tab; render();
     }));
     document.querySelectorAll('input[data-field], textarea[data-field]').forEach(el=>el.addEventListener('input',e=>{
       const i=+e.target.dataset.i; const field=e.target.dataset.field; setField(i,field,e.target.value,false);
@@ -877,6 +1015,14 @@
   });
   document.getElementById('validateBtn').addEventListener('click',()=>validate(true));
   document.getElementById('saveTopBtn').addEventListener('click',saveAll);
+  document.getElementById('collapseAllBtn').addEventListener('click',()=>{
+    rows.forEach((r,i)=>collapsedRows.add(rowUid(r,i)));
+    render();
+  });
+  document.getElementById('expandAllBtn').addEventListener('click',()=>{
+    collapsedRows.clear();
+    render();
+  });
   searchInput.addEventListener('input',render); onlyNeeds.addEventListener('change',render);
   populateBulkStore(); render(); pollDeliveryStatus();
 })();
