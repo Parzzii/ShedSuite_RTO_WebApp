@@ -1,3 +1,12 @@
+## V7.12 Approved category + color normalization
+
+- Category mapping is now restricted to the 28 unique non-empty categories from column D (D1:D170) of `category.xlsx`.
+- Confirmed spreadsheet aliases are learned directly into the app, then semantic rules and conservative fuzzy matching handle messy Style / Description values.
+- Contract and inventory Category controls only show approved RTO Pro categories.
+- Inventory Description can auto-suggest Category when you leave the description field.
+- `Burnished` is shortened to `B` in generated color/description text.
+- `Urethane` is removed completely from color/description text.
+
 ## V7.11 PDF reader reliability rebuild
 
 See `README_V7.11.txt` for the multi-engine/spatial PDF-reader update.

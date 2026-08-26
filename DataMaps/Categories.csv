@@ -1,39 +1,56 @@
-Shedsuite Building Model Variation,RTOPro Category
-MODERN UTILITY,UTILITY
-CABIN,CABIN
-LOFTED BARN CABIN,CABIN
-UTILITY,UTILITY
-SIDE UTILITY,UTILITY
-SIDE LOFTED BARN,LOFTED BARN
-GREENHOUSE,GREENHOUSE
-GARAGE,GARAGE
-T House Gazebo - Stained,GAZEBO
-LOFTED BARN,LOFTED BARN
-DELUXE CABIN,CABIN
-DELUXE LOFTED BARN CABIN,CABIN
-LOFTED GARAGE,GARAGE
-Rectangular Gazebo paint and double roof,GAZEBO
-Party House Gazebo,GAZEBO
-T House Gazebo - Painted,GAZEBO
-Octagon Gazebo (painted),GAZEBO
-MAXIMUM MODERN UTILITY,UTILITY
-Octagon Gazebo,GAZEBO
-Rectangular Gazebo Stained,GAZEBO
-Timber Frame Pavilion,PAVILION
-"Value Shed, Metal",VALUE
-"Utility Shed, SmartSide",UTILITY
-"Lofted Barn, SmartSide",LOFTED BARN
-"Lofted Barn, Metal",LOFTED BARN
-"The Westwood, SmartSide",CABIN
-"Value Shed, Smartside ",VALUE
-"Classic Playhouse, SmartSide",PLAYHOUSE
-"Monoslope, Smartside",MONOSLOPE
-Utility Shed | Smartside,UTILITY
-"Utility Shed, Metal",UTILITY
-"Carolina, Vinyl",SHED
-"Octagon Gazebo, Stained Value ",GAZEBO
-"Rectangle Gazebo, Stained",GAZEBO
-"Quaker Shed, SmartSide",SHED
-"Tea House, Vinyl Value ",TEA HOUSE
-"Octagon Gazebo,Vinyl Value Series ",GAZEBO
-METAL UTILITY - NO OPTIONS AVAILABLE,UTILITY
+﻿Shedsuite Building Model Variation,RTOPro Category
+A FRAME,A-Frame
+"CAROLINA, SMARTLAP",Carolina
+COLONIAL COTTAGE,Cottage
+COOP,Chicken Coop
+COT,Cottage
+COTTAGE PORCH,Cottage
+DELUXE,Cabin
+DELUXE CABIN,Cabin
+DELUXE LBC,Cabin
+DELUXE LOFTED BARN CABIN,Cabin
+DLB,Cabin
+DOG HOUSE,Dog Kennel
+DUTCH CABIN,Cabin
+ECONO,Economy
+GARDENER,Garden Shed
+HIGH BARN,High Barn
+HIGHWALL,Highwall
+HORSE BARN,Barn
+KENNEL,Dog Kennel
+LOFTED,Lofted Barn
+LOFTED BARN CABIN,Cabin
+"LOFTED BARN, SMARTSIDE",Lofted Barn
+LOFTED CABIN,Cabin
+LOFTED GARAGE,Garage
+LOW BARN,Barn
+LOW WALL,Barn
+METAL UTILITY - NO OPTIONS AVA,Metal Utility
+MINIBARN,Mini Barn
+MODERN HIGHLAND,Highland
+MODERN UTILITY,Utility
+"OCTAGON GAZEBO, STAINED",Gazebo
+"OCTAGON GAZEBO, STAINED VALUE",Gazebo
+PORCH BUILDING,Porch
+PORCH NOOK,Porch
+"QUAKER SHED, SMARTSIDE",Quaker
+SIDE GABLE,Gable
+SIDE LOFTED,Lofted Barn
+SIDE LOFTED BARN,Lofted Barn
+SIDE UTILITY,Utility
+SLB,Lofted Barn
+SM,Metal
+STANDARD LOFT,Lofted Barn
+STANDARD SIGNATURE,Signature
+SUT,Utility
+TEA HOUSE,Gazebo
+"THE WESTWOOD, SMARTSIDE",The Westwood
+ULTRA CABIN,Ultra
+ULTRA SERIES,Ultra
+UTILITY SHED | SMARTSIDE,Utility
+"UTILITY SHED, METAL",Metal Utility
+"UTILITY SHED, SMARTSIDE",Utility
+VALUE SERIES,Value
+"VALUE SHED, METAL",Metal Value
+"VALUE SHED, SMARTSIDE",Value
+WOODSMEN,Woodsman

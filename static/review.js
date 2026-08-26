@@ -3,6 +3,7 @@
   const refs = JSON.parse(document.getElementById('appRefs').textContent || '{}');
   const headers = JSON.parse(document.getElementById('appHeaders').textContent || '[]');
   const sources = JSON.parse(document.getElementById('appSources').textContent || '[]');
+  const approvedCategories = Array.isArray(window.APPROVED_CATEGORIES) ? window.APPROVED_CATEGORIES : [];
   const cards = document.getElementById('cards');
   const saveForm = document.getElementById('saveForm');
   const rowsPayload = document.getElementById('rowsPayload');
@@ -251,6 +252,10 @@
   function inputField(i, field, label, opts={}) {
     const r=rows[i]; const val=clean(r[field]);
     const type=opts.type || 'text';
+    if (field==='CATEGORY1' && approvedCategories.length) {
+      const options=approvedCategories.map(c=>`<option value="${esc(c)}" ${c===val?'selected':''}>${esc(c)}</option>`).join('');
+      return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><select class="approved-category-select" data-i="${i}" data-field="${field}">${options}</select><small>Approved RTO Pro categories only</small></label>`;
+    }
     return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input type="${type}" data-i="${i}" data-field="${field}" value="${esc(val)}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}>${opts.small?`<small>${esc(opts.small)}</small>`:''}</label>`;
   }
 
@@ -923,6 +928,9 @@
       if (['CELL','REFPHONE1','REFPHONE2','REFERENCE1','REFRELATION1','REFERENCE2','REFRELATION2'].includes(field)) applyPhoneRule(i,false);
       if (['MODEL1','CONTRACT','DEALERID'].includes(field)) updateStats();
     }));
+    document.querySelectorAll('select.approved-category-select').forEach(el=>el.addEventListener('change',e=>{
+      const i=+e.target.dataset.i; rows[i].CATEGORY1=e.target.value; updateStats();
+    }));
     document.querySelectorAll('input[data-field="MODEL1"]').forEach(el=>el.addEventListener('change',e=>{
       const i=+e.target.dataset.i; if (boolish(rows[i]._used_building)) { applyUsedBuilding(i,true,false); render(); }
     }));
@@ -1013,9 +1021,14 @@
     allFieldsGrid.innerHTML=headers.map(h=>{
       const val=clean(rows[i][h]); allFieldDraft[h]=val;
       const important=['ACCOUNT','CONTRACT','MODEL1','STORE','DEALERID','ZONE','TAXZONE','TAXRATE','CATEGORY1','DESCRIPTION1'].includes(h);
+      if (h==='CATEGORY1' && approvedCategories.length) {
+        const options=approvedCategories.map(c=>`<option value="${esc(c)}" ${c===val?'selected':''}>${esc(c)}</option>`).join('');
+        return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><select data-all-field="${esc(h)}">${options}</select></label>`;
+      }
       return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><input data-all-field="${esc(h)}" value="${esc(val)}"></label>`;
     }).join('');
     allFieldsGrid.querySelectorAll('input').forEach(el=>el.addEventListener('input',()=>allFieldDraft[el.dataset.allField]=el.value));
+    allFieldsGrid.querySelectorAll('select[data-all-field]').forEach(el=>el.addEventListener('change',()=>allFieldDraft[el.dataset.allField]=el.value));
     allFieldsDialog.showModal();
   }
   document.getElementById('applyAllFields').addEventListener('click',()=>{

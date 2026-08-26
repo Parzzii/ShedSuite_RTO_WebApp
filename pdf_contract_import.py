@@ -835,6 +835,12 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             'Customer Employer Name': _get(fields, 'employer', 'Name', 'Employer Name'),
             'Customer Employer Phone': _get(fields, 'employer', 'Phone'),
             'Building Model Variation': model_variation,
+            # Preserve the raw PDF style fields as extra evidence for V7.12's
+            # approved-category matcher. These are harmless for CSV transforms
+            # and make vague descriptions much easier to classify correctly.
+            'Description': desc,
+            'Unit Type': unit_type,
+            'Style': style,
             'Siding Color': _get(fields, 'unit', 'Base Color'),
             'Trim Color': _get(fields, 'unit', 'Trim Color'),
             'Roof Color': _get(fields, 'unit', 'Roof Color'),

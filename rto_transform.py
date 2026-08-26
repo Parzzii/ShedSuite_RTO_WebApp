@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
+
 try:
     import pyodbc  # type: ignore
 except Exception:
@@ -195,10 +197,12 @@ def next_due(delivered: date | None, due_day: int, today: date | None = None) ->
 
 
 def clean_color(v: Any) -> str:
-    s = clean_text(v)
-    # Power Query replaces these suffixes with a slash, then merges with '/'.
-    s = re.sub(r'\s*-\s*(PAINT|URETHANE)\s*$', '', s, flags=re.I)
-    return s.strip().upper()
+    s = normalize_color_words(clean_text(v))
+    # Keep the original trailing "- PAINT" cleanup after V7.12's global
+    # Burnished/Urethane normalization.
+    s = re.sub(r'\s*-\s*PAINT\s*$', '', s, flags=re.I)
+    s = re.sub(r'\s*-\s*$', '', s)
+    return s.strip(' ,-/').upper()
 
 
 def reformatted_model(v: Any) -> str:
@@ -709,11 +713,18 @@ def phone5_and_comment(src: dict[str, str]) -> tuple[str, str, str]:
     return other, comment, source
 
 def category_for(src: dict[str, str], categories: dict[str, str]) -> str:
-    key = category_key(src.get('Building Model Variation'))
-    if key in categories:
-        return categories[key].lower()
-    # Change Log V1.1.7 says category became left 30 characters of model variation minus dimensions.
-    return key[:30].strip().lower()
+    # V7.12: RTO Pro only accepts the approved category list supplied in
+    # category.xlsx column D. Use the model/style/description as evidence, but
+    # always return one canonical approved category. Confirmed spreadsheet
+    # aliases win before semantic/fuzzy matching.
+    return smart_category(
+        src.get('Building Model Variation'),
+        src.get('Description'),
+        src.get('Building Description'),
+        src.get('Unit Type'),
+        src.get('Style'),
+        aliases=categories,
+    )
 
 
 # Canonical RTO Pro Brand/Vendor names.  ShedSuite company names can include

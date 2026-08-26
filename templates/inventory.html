@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
-  <title>Inventory · ShedSuite → RTO Pro V7.11</title>
+  <title>Inventory · ShedSuite → RTO Pro V7.12</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -26,9 +26,9 @@
   <main class="shell wide inventory-shell">
     <header class="review-head inventory-head">
       <div>
-        <div class="eyebrow">V7.11 · INVENTORY ONLY</div>
+        <div class="eyebrow">V7.12 · INVENTORY ONLY</div>
         <h1>Add inventory</h1>
-        <p class="lede small">Choose the company/model series on each building. V7.11 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
+        <p class="lede small">Choose the company/model series on each building. V7.12 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
       </div>
       <button type="button" class="primary big inventory-add" id="addInventory">+ Add inventory</button>
     </header>
@@ -56,7 +56,7 @@
 
   <script id="inventoryRows" type="application/json">{{ rows|tojson }}</script>
   <script id="inventoryRefs" type="application/json">{{ refs|tojson }}</script>
-  <script>window.INVENTORY_JOB={{ job|tojson }};</script>
+  <script>window.INVENTORY_JOB={{ job|tojson }}; window.APPROVED_CATEGORIES={{ approved_categories|tojson }};</script>
   <script>
   (() => {
     let rows = JSON.parse(document.getElementById('inventoryRows').textContent || '[]');
@@ -65,6 +65,7 @@
     const stores = Array.isArray(refs.stores) ? refs.stores : [];
     const agents = Array.isArray(refs.agents) ? refs.agents : [];
     const existingPairs = new Set(Array.isArray(refs.existing_pairs) ? refs.existing_pairs : []);
+    const approvedCategories = Array.isArray(window.APPROVED_CATEGORIES) ? window.APPROVED_CATEGORIES : [];
     const cards = document.getElementById('inventoryCards');
     const empty = document.getElementById('inventoryEmpty');
     const validation = document.getElementById('inventoryValidation');
@@ -107,7 +108,7 @@
     function newRow() {
       return {
         company_profile:'', model:'', serial:'', stock:'', daterec:today(), cost:'', balance:'', rbvbook:'',
-        description:'', invoice:'', brand:'', category:'NONE', vendor:'', agent:'', bor:'NO',
+        description:'', invoice:'', brand:'', category:'', vendor:'', agent:'', bor:'NO',
         rentalretail:'RENTAL', quantity:'1', store:'', retail:'', rto:'', _auto_model:true
       };
     }
@@ -124,6 +125,21 @@
     }
     function field(i,key,label,type='text',extra='') {
       return `<label class="field"><span>${esc(label)}</span><input type="${type}" data-i="${i}" data-field="${esc(key)}" value="${esc(rows[i][key])}" ${extra}></label>`;
+    }
+    function categorySelect(i) {
+      const current=clean(rows[i].category);
+      const opts=approvedCategories.map(c=>`<option value="${esc(c)}" ${c===current?'selected':''}>${esc(c)}</option>`).join('');
+      return `<label class="field"><span>Category</span><select class="inventory-category" data-i="${i}" data-field="category"><option value="">— Auto from description —</option>${opts}</select><small>Only approved RTO Pro categories are available.</small></label>`;
+    }
+    async function suggestCategory(i) {
+      const r=rows[i];
+      const text=clean(r.description);
+      if(!text) return;
+      try {
+        const res=await fetch('/api/category-suggest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:text})});
+        const data=await res.json();
+        if(data && data.ok && clean(data.category)) { r.category=clean(data.category); render(); }
+      } catch(e) {}
     }
     function textArea(i,key,label) {
       return `<label class="field inventory-description"><span>${esc(label)}</span><textarea data-i="${i}" data-field="${esc(key)}" rows="3">${esc(rows[i][key])}</textarea></label>`;
@@ -172,7 +188,7 @@
             ${field(i,'daterec','Date received')}
           </div>
           <div class="inventory-feature-row inventory-only-feature">
-            ${field(i,'category','Category')}
+            ${categorySelect(i)}
             ${textArea(i,'description','Description')}
           </div>
           <div class="inventory-details-grid">
@@ -214,6 +230,7 @@
           if(['model','serial','stock'].includes(f)) renderValidation(false);
         });
       });
+      document.querySelectorAll('textarea[data-field="description"]').forEach(el=>el.addEventListener('change',e=>suggestCategory(+e.target.dataset.i)));
       document.querySelectorAll('.inventory-profile').forEach(el=>el.addEventListener('change',e=>{ const i=+e.target.dataset.i; applyProfile(i,e.target.value); render(); }));
       document.querySelectorAll('.inventory-store').forEach(el=>el.addEventListener('change',e=>{ const i=+e.target.dataset.i; rows[i].store=e.target.value; rows[i].agent=agentForStore(e.target.value); render(); }));
       document.querySelectorAll('.use-next-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].model=btn.dataset.value; rows[i]._auto_model=true; render(); }));

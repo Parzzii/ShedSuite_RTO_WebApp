@@ -47,6 +47,7 @@ from rto_transform import (
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
 from delivery_certificate import append_delivery_certificates
 from pdf_contract_import import parse_contract_pdf
+from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
 
 
 BASE = Path(__file__).resolve().parent
@@ -968,11 +969,18 @@ def normalize_inventory_rows(rows: list[dict]) -> list[dict]:
         row['model'] = row['model'][:15]
         row['serial'] = row['serial'][:30]
         row['stock'] = row['stock'][:15]
-        row['description'] = row['description'][:250]
+        row['description'] = normalize_color_words(row['description'])[:250]
         row['invoice'] = row['invoice'][:15]
         row['brand'] = row['brand'].upper()[:15]
         row['vendor'] = row['vendor'].upper()[:15]
-        row['category'] = (row['category'] or 'NONE')[:31]
+        # V7.12: inventory can use only the approved category.xlsx column-D
+        # categories. Preserve an approved manual choice; otherwise infer it
+        # from Description (and any legacy category text) automatically.
+        raw_category = row['category'] if row['category'].upper() not in {'', 'NONE'} else ''
+        row['category'] = (
+            canonical_category(raw_category)
+            or smart_category(row['description'], raw_category)
+        )[:31]
         row['agent'] = row['agent'][:30]
         row['store'] = row['store'][:10]
         row['daterec'] = row['daterec'] or datetime.now().strftime('%m/%d/%Y')
@@ -2249,6 +2257,16 @@ def _ensure_row_uids(rows: list[dict]) -> bool:
 def save_job_rows(jp: Path, rows: list[dict]):
     for row in rows:
         _prepare_phone_and_customer_comment(row)
+        row['DESCRIPTION1'] = normalize_color_words(row.get('DESCRIPTION1', ''))
+        # Enforce the same approved category list even after manual edits / the
+        # full-fields dialog. Invalid legacy text is smart-matched instead of
+        # being allowed into the RTO import CSV.
+        current_category = canonical_category(row.get('CATEGORY1', ''))
+        row['CATEGORY1'] = current_category or smart_category(
+            row.get('_source_model_variation', ''),
+            row.get('DESCRIPTION1', ''),
+            row.get('CATEGORY1', ''),
+        )
     _ensure_row_uids(rows)
     # V7 serializes writes with the certificate worker so edits and background
     # PDF completion cannot overwrite one another.
@@ -2662,7 +2680,16 @@ def inventory_review(job):
         rows=rows,
         refs=refs,
         inventory_headers=INVENTORY_HEADERS,
+        approved_categories=APPROVED_CATEGORIES,
     )
+
+
+@app.post('/api/category-suggest')
+def category_suggest():
+    data = request.get_json(silent=True) or {}
+    text = str(data.get('description', '') or '').strip()
+    extra = str(data.get('style', '') or '').strip()
+    return jsonify({'ok': True, 'category': smart_category(text, extra), 'allowed': APPROVED_CATEGORIES})
 
 
 @app.post('/api/inventory/<job>/save')
@@ -3149,6 +3176,7 @@ def review(job):
         headers=RTO_HEADERS,
         sources=sources,
         input_summary=input_summary,
+        approved_categories=APPROVED_CATEGORIES,
     )
     return inject_review_panels(page_html, source_rows, rows, job, refs)
 

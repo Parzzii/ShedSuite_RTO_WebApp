@@ -97,7 +97,7 @@
   <script id="appRefs" type="application/json">{{ refs|tojson }}</script>
   <script id="appHeaders" type="application/json">{{ headers|tojson }}</script>
   <script id="appSources" type="application/json">{{ sources|tojson }}</script>
-  <script>window.RTO_JOB = {{ job|tojson }};</script>
+  <script>window.RTO_JOB = {{ job|tojson }}; window.APPROVED_CATEGORIES = {{ approved_categories|tojson }};</script>
   <script src="{{ url_for('static', filename='review.js') }}"></script>
   <script src="{{ url_for('static', filename='theme.js') }}"></script>
 </body>
