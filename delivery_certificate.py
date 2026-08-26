@@ -239,20 +239,34 @@ async def _login_context(browser, email: str, password: str, base: Path, legacy_
 
 
 async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[bytes | None, str, str]:
-    """Capture only the Delivery Certificate using the robust V4 capture paths."""
+    """Capture only the Delivery Certificate from a ShedSuite order.
+
+    V7.6.2 deliberately waits for ShedSuite's React attachment list.  Earlier
+    V7.6.x builds inspected the DOM immediately after ``domcontentloaded`` and
+    could therefore report a false Missing result while the Files list was
+    still rendering.
+    """
     order_url = BASE_URL + str(order_id)
     responses = []
 
     def remember(response):
         responses.append(response)
 
-    try:
-        await page.goto(order_url, wait_until='domcontentloaded', timeout=90000)
-        # ShedSuite has changed its generated CSS class names over time. Prefer
-        # the historical fileName selector, but fall back to any visible element
-        # whose text identifies a Delivery Certificate.
-        target = None
-        found_name = ''
+    async def login_screen_visible() -> bool:
+        try:
+            if '/login' in str(page.url).lower():
+                return True
+        except Exception:
+            pass
+        try:
+            email = page.locator('input[type="email"]')
+            password = page.locator('input[type="password"]')
+            return (await email.count() > 0 and await password.count() > 0
+                    and await email.first.is_visible() and await password.first.is_visible())
+        except Exception:
+            return False
+
+    async def locate_delivery_target():
         candidate_selectors = [
             'span[class^="fileName"]',
             'span[class*="fileName"]',
@@ -265,46 +279,101 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
                 for i in range(count):
                     loc = locs.nth(i)
                     name = ((await loc.text_content()) or '').strip()
-                    low = name.lower()
-                    if 'delivery' in low and ('certificate' in low or 'cert' in low):
-                        target = loc
-                        found_name = name
-                        break
-                if target is not None:
-                    break
+                    low = re.sub(r'\s+', ' ', name.lower())
+                    if 'delivery' in low and ('certificate' in low or re.search(r'\bcert\b', low)):
+                        return loc, name
             except Exception:
                 continue
 
-        if target is None:
+        # Fall back to text rather than generated CSS classes.  Exact=False is
+        # intentional because ShedSuite sometimes adds a date/file extension.
+        try:
+            text_matches = page.get_by_text(
+                re.compile(r'delivery\s*(certificate|cert(?:ificate)?)', re.I)
+            )
+            count = await text_matches.count()
+            for i in range(count):
+                loc = text_matches.nth(i)
+                try:
+                    if not await loc.is_visible():
+                        continue
+                except Exception:
+                    pass
+                name = ((await loc.text_content()) or '').strip()
+                if name:
+                    return loc, name
+        except Exception:
+            pass
+        return None, ''
+
+    async def wait_for_delivery_target(timeout_ms: int):
+        """Poll because ShedSuite's Files section is populated after page load."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (timeout_ms / 1000.0)
+        files_seen_at = None
+        last_body = ''
+        while loop.time() < deadline:
+            if await login_screen_visible():
+                return None, '', 'ShedSuite session is not authenticated (login page was shown).'
+
+            target, name = await locate_delivery_target()
+            if target is not None:
+                return target, name, ''
+
+            # Once the attachment list itself is clearly present, allow a few
+            # extra seconds for all rows to render before deciding the certificate
+            # truly is absent.
             try:
-                text_matches = page.get_by_text(
-                    re.compile(r'delivery\s*(certificate|cert(?:ificate)?)', re.I)
-                )
-                for i in range(await text_matches.count()):
-                    loc = text_matches.nth(i)
-                    try:
-                        if not await loc.is_visible():
-                            continue
-                    except Exception:
-                        pass
-                    name = ((await loc.text_content()) or '').strip()
-                    if name:
-                        target = loc
-                        found_name = name
-                        break
+                file_count = await page.locator('[class*="fileName"]').count()
             except Exception:
-                pass
+                file_count = 0
+            if file_count:
+                if files_seen_at is None:
+                    files_seen_at = loop.time()
+                elif loop.time() - files_seen_at >= 8:
+                    try:
+                        last_body = (await page.locator('body').inner_text()).lower()
+                    except Exception:
+                        last_body = ''
+                    if 'delivery certificate' not in last_body and 'delivery cert' not in last_body:
+                        return None, '', 'Delivery Certificate was not listed on the ShedSuite order page.'
+
+            await page.wait_for_timeout(1000)
+
+        try:
+            last_body = (await page.locator('body').inner_text()).lower()
+        except Exception:
+            last_body = ''
+        if 'delivery certificate' in last_body or 'delivery cert' in last_body:
+            return None, '', 'Delivery Certificate text was present but its clickable element could not be located.'
+        return None, '', 'Timed out waiting for ShedSuite to load the Delivery Certificate/file list.'
+
+    try:
+        # Try twice. A soft reload fixes occasional ShedSuite orders whose Files
+        # request stalls even though the order page itself has loaded.
+        target = None
+        found_name = ''
+        find_error = ''
+        for attempt in range(2):
+            if attempt == 0:
+                await page.goto(order_url, wait_until='domcontentloaded', timeout=90000)
+            else:
+                try:
+                    await page.reload(wait_until='domcontentloaded', timeout=90000)
+                except Exception:
+                    await page.goto(order_url, wait_until='domcontentloaded', timeout=90000)
+
+            # Keep the historical 90-second tolerance on the first attempt. The
+            # retry is shorter because it is only a recovery path.
+            target, found_name, find_error = await wait_for_delivery_target(90000 if attempt == 0 else 30000)
+            if target is not None:
+                break
+            # Authentication problems will not be repaired by refreshing.
+            if 'not authenticated' in find_error.lower():
+                return None, find_error, ''
 
         if target is None:
-            # Give React-loaded attachment lists one final moment to render.
-            await page.wait_for_timeout(2500)
-            try:
-                body_text = (await page.locator('body').inner_text()).lower()
-            except Exception:
-                body_text = ''
-            if 'delivery certificate' in body_text or 'delivery cert' in body_text:
-                return None, 'Delivery Certificate text was present but its clickable element could not be located', ''
-            return None, 'Delivery Certificate not found on the ShedSuite order page', ''
+            return None, find_error or 'Delivery Certificate not found on the ShedSuite order page.', ''
 
         # Some ShedSuite builds expose an authenticated anchor directly.
         try:
@@ -322,7 +391,16 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
         before_url = page.url
 
         try:
-            await target.click(timeout=15000)
+            # Prefer the nearest clickable ancestor. Clicking a nested text span
+            # does not always trigger the document viewer in newer ShedSuite UI.
+            try:
+                clickable = target.locator('xpath=ancestor-or-self::a[1] | ancestor-or-self::button[1] | ancestor-or-self::*[@role="button"][1]').first
+                if await clickable.count() and await clickable.is_visible():
+                    await clickable.click(timeout=15000)
+                else:
+                    await target.click(timeout=15000)
+            except Exception:
+                await target.click(timeout=15000)
         except Exception as exc:
             for task in (popup_task, download_task):
                 if not task.done():
@@ -330,7 +408,7 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
             return None, f'click failed: {exc}', found_name
 
         done, pending = await asyncio.wait(
-            [popup_task, download_task], timeout=18, return_when=asyncio.FIRST_COMPLETED
+            [popup_task, download_task], timeout=20, return_when=asyncio.FIRST_COMPLETED
         )
         for task in pending:
             task.cancel()
@@ -342,7 +420,10 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
                     temp_path = Path(tf.name)
                 try:
                     await download.save_as(str(temp_path))
-                    return bytes_to_pdf(temp_path.read_bytes()), 'browser download', found_name
+                    raw = temp_path.read_bytes()
+                    converted = bytes_to_pdf(raw)
+                    if converted:
+                        return converted, 'browser download', found_name
                 finally:
                     temp_path.unlink(missing_ok=True)
             except Exception:
@@ -372,7 +453,7 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
                 pass
 
         # A PDF viewer may fetch the bytes in the background without a useful URL.
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(3000)
         for response in reversed(responses):
             try:
                 ctype = str((response.headers or {}).get('content-type', '')).lower()
@@ -380,7 +461,9 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
                 if 'pdf' in ctype or 'application/octet-stream' in ctype or 'delivery' in url or 'certificate' in url:
                     raw = await response.body()
                     if raw:
-                        return bytes_to_pdf(raw), 'network response', found_name
+                        converted = bytes_to_pdf(raw)
+                        if converted:
+                            return converted, 'network response', found_name
             except Exception:
                 continue
 
@@ -395,7 +478,7 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
             except Exception:
                 pass
 
-        return None, 'found and clicked, but no document bytes were captured', found_name
+        return None, 'Delivery Certificate was found and clicked, but no PDF bytes were captured.', found_name
     except Exception as exc:
         return None, str(exc), ''
     finally:
@@ -403,7 +486,6 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
             page.remove_listener('response', remember)
         except Exception:
             pass
-
 
 def _append_pdf(target: Path, cert_bytes: bytes) -> None:
     cert = fitz.open(stream=cert_bytes, filetype='pdf')
@@ -446,15 +528,20 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
 
     async with async_playwright() as playwright:
         # ShedSuite has historically been unreliable in true headless mode.
-        # On Windows V7.6.1 uses a normal Chromium window placed/minimized far
-        # off-screen. It behaves like a headed browser to ShedSuite while the user
-        # keeps working in the web app. Non-Windows environments remain headless.
+        # On Windows V7.6.2 uses a normal headed Chromium window positioned far
+        # off-screen. Do NOT minimize it: Chromium aggressively throttles React/JS
+        # in minimized or occluded windows, which can leave ShedSuite's Files list
+        # empty and create a false Missing result. These flags keep the renderer
+        # active while the user continues working in the normal web-app window.
         launch_kwargs = {'headless': headless}
         if not headless:
             launch_kwargs['args'] = [
                 '--window-position=-32000,-32000',
                 '--window-size=1200,900',
-                '--start-minimized',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-features=CalculateNativeWinOcclusion',
             ]
         browser = await playwright.chromium.launch(**launch_kwargs)
         contexts: dict[str, tuple] = {}

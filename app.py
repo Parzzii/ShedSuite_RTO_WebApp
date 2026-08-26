@@ -2274,7 +2274,7 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
             if only_order_ids:
                 rows = [r for r in rows if str(r.get('_source_order_id', '') or '').strip() in only_order_ids]
             else:
-                # Initial V7.6.1 run: queue only ShedSuite/CSV contracts. Imported
+                # Initial V7.6.2 run: queue only ShedSuite/CSV contracts. Imported
                 # PDFs are already complete packets and must never enter the
                 # ShedSuite browser lookup.
                 rows = [
