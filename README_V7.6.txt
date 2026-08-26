@@ -1,7 +1,7 @@
-ShedSuite RTO Web App V7.6
+ShedSuite RTO Web App V7.6.1
 ===========================
 
-V7.6 adds mixed contract intake on top of V7.5.
+V7.6.1 adds mixed contract intake on top of V7.5.
 
 CONTRACT INPUTS
 ---------------
@@ -42,3 +42,12 @@ LIMITATION
 The first supported PDF format is the RentaBarn-style table layout discussed during development. The PDF must contain selectable text. Scanned-image PDFs/screenshots are intentionally not OCR'd; re-download the original digital PDF for reliable parsing.
 
 Everything from V7.5 remains, including Inventory-only receiving, Firebird lookups, model suggestions, used-building suffix editing, phone normalization, discard, brand/vendor normalization, dark mode, hidden Cyberpunk mode, multi-CSV input, and live background coordinate updates.
+
+
+V7.6.1 DELIVERY CERTIFICATE RELIABILITY FIX
+-------------------------------------------
+- Initial background worker now explicitly selects queued ShedSuite/CSV rows from the saved job.
+- Windows uses headed Chromium minimized/off-screen instead of true headless mode because ShedSuite is more reliable with a normal browser context.
+- Delivery Certificate DOM detection now tolerates changed/generated fileName classes and visible text matches.
+- Contract_Import.xlsm / Logininfo discovery now searches common nested version folders more reliably.
+- The review page remains editable while Chromium runs in the background.

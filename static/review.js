@@ -515,7 +515,7 @@
     document.getElementById('deliveryProgressCount').textContent=`${done}/${total}`;
     document.getElementById('deliveryWorkerState').textContent=deliveryStatus.active?'Running in background':'Complete';
     const working=Number(c.working||0), queued=Number(c.queued||0), ready=Number(c.ready||0), missing=Number(c.missing||0), skipped=Number(c.skipped||0);
-    document.getElementById('deliveryProgressText').textContent=deliveryStatus.active ? (working?'Chromium is downloading a certificate. You can keep editing.':'Chromium is running headlessly in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.');
+    document.getElementById('deliveryProgressText').textContent=deliveryStatus.active ? (working?'Chromium is downloading a certificate. You can keep editing.':'Chromium is running in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.');
     document.getElementById('deliveryProgressStats').innerHTML=[ready?`<span>✓ ${ready} Ready</span>`:'',working?`<span>⏳ ${working} Downloading</span>`:'',queued?`<span>○ ${queued} Waiting</span>`:'',missing?`<span>⚠ ${missing} Missing</span>`:'',skipped?`<span>↷ ${skipped} Skipped</span>`:''].filter(Boolean).join('');
 
     document.querySelectorAll('[data-cert-order]').forEach(el=>{

@@ -2157,7 +2157,10 @@ def _initialize_certificate_status(jp: Path, rows: list[dict], active: bool) -> 
     _write_certificate_status(jp, {
         'active': bool(active and queued_any),
         'complete': not bool(active and queued_any),
-        'headless': True,
+        # On Windows the worker uses a normal Chromium window kept minimized/
+        # off-screen because ShedSuite is more reliable than in true headless mode.
+        'headless': os.name != 'nt',
+        'browser_mode': 'headless' if os.name != 'nt' else 'background',
         'items': items,
     })
 
@@ -2270,16 +2273,34 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
             source_rows = json.loads((jp / 'source_rows.json').read_text(encoding='utf-8')) if (jp / 'source_rows.json').exists() else []
             if only_order_ids:
                 rows = [r for r in rows if str(r.get('_source_order_id', '') or '').strip() in only_order_ids]
+            else:
+                # Initial V7.6.1 run: queue only ShedSuite/CSV contracts. Imported
+                # PDFs are already complete packets and must never enter the
+                # ShedSuite browser lookup.
+                rows = [
+                    r for r in rows
+                    if str(r.get('_source_type', 'csv') or 'csv').lower() != 'pdf'
+                    and str(r.get('_delivery_certificate', '') or '').lower() in {'queued', ''}
+                ]
             status = _read_certificate_status(jp)
-            status['active'] = True
-            status['complete'] = False
-            status['headless'] = True
+            status['active'] = bool(rows)
+            status['complete'] = not bool(rows)
+            browser_headless = os.name != 'nt'
+            status['headless'] = browser_headless
+            status['browser_mode'] = 'headless' if browser_headless else 'background'
             status.setdefault('items', {})
             for r in rows:
                 oid = str(r.get('_source_order_id', '') or '').strip()
                 if oid:
-                    status['items'][oid] = {'status': 'queued', 'name': str(r.get('NAME', '') or oid), 'detail': 'Waiting for background Chromium…'}
+                    status['items'][oid] = {
+                        'status': 'queued',
+                        'name': str(r.get('NAME', '') or oid),
+                        'detail': 'Waiting for background Chromium…',
+                    }
             _write_certificate_status(jp, status)
+
+        if not rows:
+            return
 
         def still_present(oid: str) -> bool:
             try:
@@ -2347,9 +2368,13 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
                 }
                 _write_certificate_status(jp, st)
 
+        # On Windows run Chromium as a normal browser kept minimized/off-screen.
+        # ShedSuite has proven more reliable this way than in true headless mode,
+        # and the Flask review page remains fully editable while it runs.
+        browser_headless = os.name != 'nt'
         warnings = append_delivery_certificates(
             rows, source_rows, jp / 'Combined_Files', BASE,
-            progress=progress, should_process=still_present, headless=True
+            progress=progress, should_process=still_present, headless=browser_headless
         )
         _merge_certificate_results(job, rows, warnings)
 
@@ -2849,7 +2874,9 @@ def process():
 
     if download_requested and delivery_order_ids:
         _initialize_certificate_status(jp, rows, active=True)
-        _start_certificate_worker(job, delivery_order_ids)
+        # Let the worker select all queued ShedSuite/CSV rows from the saved job.
+        # Retry requests still pass a specific order id.
+        _start_certificate_worker(job)
     else:
         _initialize_certificate_status(jp, rows, active=False)
 

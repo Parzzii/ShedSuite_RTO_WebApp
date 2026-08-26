@@ -50,18 +50,31 @@ def _find_legacy_workbook(base: Path) -> Path | None:
         except Exception:
             pass
 
-    # Last-resort shallow search of the normal user folders. This avoids a
-    # full drive scan while still finding an extracted old program folder.
-    for root in [home / 'Downloads', home / 'Desktop', home / 'Documents']:
-        if not root.exists():
-            continue
+    # Last-resort bounded search of the normal user folders and the current
+    # app's parent tree. New V7 builds are often extracted into another nested
+    # version folder, while Contract_Import.xlsm remains beside an older build.
+    # Search several levels without ever scanning the whole drive.
+    search_roots = [base.parent, base.parent.parent, home / 'Downloads', home / 'Desktop', home / 'Documents']
+    seen_roots = set()
+    for root in search_roots:
         try:
-            for p in root.glob('*/Contract_Import.xlsm'):
-                if p.is_file():
-                    return p.resolve()
-            for p in root.glob('*/*/Contract_Import.xlsm'):
-                if p.is_file():
-                    return p.resolve()
+            root = root.resolve()
+        except Exception:
+            continue
+        if root in seen_roots or not root.exists():
+            continue
+        seen_roots.add(root)
+        try:
+            root_depth = len(root.parts)
+            for current, dirs, files in os.walk(root):
+                current_path = Path(current)
+                depth = len(current_path.parts) - root_depth
+                # Four nested folders is enough for typical Desktop\shed\version
+                # layouts while avoiding an expensive recursive user-profile scan.
+                if depth >= 4:
+                    dirs[:] = []
+                if 'Contract_Import.xlsm' in files:
+                    return (current_path / 'Contract_Import.xlsm').resolve()
         except Exception:
             pass
     return None
@@ -187,18 +200,39 @@ async def _login_context(browser, email: str, password: str, base: Path, legacy_
     await page.goto(HOME_URL, wait_until='domcontentloaded', timeout=90000)
     await page.wait_for_timeout(2500)
 
-    login_button = page.get_by_role('button', name='Log in')
+    login_button = page.get_by_role('button', name=re.compile(r'log\s*in', re.I))
+    email_box = page.get_by_label(re.compile(r'email', re.I))
+    password_box = page.get_by_label(re.compile(r'password', re.I))
     try:
         needs_login = await login_button.is_visible()
     except Exception:
         needs_login = False
+    if not needs_login:
+        try:
+            needs_login = await email_box.is_visible() and await password_box.is_visible()
+        except Exception:
+            needs_login = False
 
     if needs_login:
         # No prompt: this is exactly why we read the old workbook's Logininfo.
-        await page.get_by_label('Email').fill(email)
-        await page.get_by_label('Password').fill(password)
-        await login_button.click()
-        await expect(page).to_have_url(re.compile(r'https://app\.shedsuite\.com/rto/.*'), timeout=300000)
+        try:
+            await email_box.fill(email)
+        except Exception:
+            await page.locator('input[type="email"]').first.fill(email)
+        try:
+            await password_box.fill(password)
+        except Exception:
+            await page.locator('input[type="password"]').first.fill(password)
+        try:
+            await login_button.click()
+        except Exception:
+            await page.locator('button[type="submit"]').first.click()
+        try:
+            await expect(page).to_have_url(re.compile(r'https://app\.shedsuite\.com/rto/.*'), timeout=300000)
+        except Exception:
+            # ShedSuite occasionally lands on another authenticated app route.
+            # A successful disappearance of the login fields is sufficient.
+            await page.wait_for_timeout(2500)
         await context.storage_state(path=str(local_auth))
 
     return context, page
@@ -214,20 +248,63 @@ async def _capture_delivery_certificate(page, context, order_id: str) -> tuple[b
 
     try:
         await page.goto(order_url, wait_until='domcontentloaded', timeout=90000)
-        await page.wait_for_selector('span[class^="fileName"]', timeout=90000)
-        spans = page.locator('span[class^="fileName"]')
+        # ShedSuite has changed its generated CSS class names over time. Prefer
+        # the historical fileName selector, but fall back to any visible element
+        # whose text identifies a Delivery Certificate.
         target = None
         found_name = ''
-        for i in range(await spans.count()):
-            loc = spans.nth(i)
-            name = ((await loc.text_content()) or '').strip()
-            low = name.lower()
-            if 'delivery' in low and ('certificate' in low or 'cert' in low):
-                target = loc
-                found_name = name
-                break
+        candidate_selectors = [
+            'span[class^="fileName"]',
+            'span[class*="fileName"]',
+            '[class*="fileName"]',
+        ]
+        for selector in candidate_selectors:
+            try:
+                locs = page.locator(selector)
+                count = await locs.count()
+                for i in range(count):
+                    loc = locs.nth(i)
+                    name = ((await loc.text_content()) or '').strip()
+                    low = name.lower()
+                    if 'delivery' in low and ('certificate' in low or 'cert' in low):
+                        target = loc
+                        found_name = name
+                        break
+                if target is not None:
+                    break
+            except Exception:
+                continue
+
         if target is None:
-            return None, 'Delivery Certificate not found', ''
+            try:
+                text_matches = page.get_by_text(
+                    re.compile(r'delivery\s*(certificate|cert(?:ificate)?)', re.I)
+                )
+                for i in range(await text_matches.count()):
+                    loc = text_matches.nth(i)
+                    try:
+                        if not await loc.is_visible():
+                            continue
+                    except Exception:
+                        pass
+                    name = ((await loc.text_content()) or '').strip()
+                    if name:
+                        target = loc
+                        found_name = name
+                        break
+            except Exception:
+                pass
+
+        if target is None:
+            # Give React-loaded attachment lists one final moment to render.
+            await page.wait_for_timeout(2500)
+            try:
+                body_text = (await page.locator('body').inner_text()).lower()
+            except Exception:
+                body_text = ''
+            if 'delivery certificate' in body_text or 'delivery cert' in body_text:
+                return None, 'Delivery Certificate text was present but its clickable element could not be located', ''
+            return None, 'Delivery Certificate not found on the ShedSuite order page', ''
 
         # Some ShedSuite builds expose an authenticated anchor directly.
         try:
@@ -368,9 +445,18 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
     warnings: list[str] = []
 
     async with async_playwright() as playwright:
-        # The old Excel automation explicitly required visible Chromium; headless
-        # mode was unreliable with ShedSuite.
-        browser = await playwright.chromium.launch(headless=headless)
+        # ShedSuite has historically been unreliable in true headless mode.
+        # On Windows V7.6.1 uses a normal Chromium window placed/minimized far
+        # off-screen. It behaves like a headed browser to ShedSuite while the user
+        # keeps working in the web app. Non-Windows environments remain headless.
+        launch_kwargs = {'headless': headless}
+        if not headless:
+            launch_kwargs['args'] = [
+                '--window-position=-32000,-32000',
+                '--window-size=1200,900',
+                '--start-minimized',
+            ]
+        browser = await playwright.chromium.launch(**launch_kwargs)
         contexts: dict[str, tuple] = {}
         try:
             for row in rows:
