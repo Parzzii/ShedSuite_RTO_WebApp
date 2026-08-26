@@ -49,6 +49,9 @@
       <label>Bulk store <select id="bulkStore"></select></label>
       <button type="button" class="secondary" id="applyBulkStore">Apply store to visible rows</button>
       <label class="toggle"><input id="onlyNeeds" type="checkbox"><span>Show only rows needing review</span></label>
+      <button type="button" class="secondary compact-action" id="collapseAllBtn">Collapse all</button>
+      <button type="button" class="secondary compact-action" id="expandAllBtn">Expand all</button>
+      <span id="sortStatus" class="sort-status">Drag ⠿ to reorder</span>
       <a class="button ghost push-right" href="{{ url_for('download', job=job, kind='review') }}">Review report CSV</a>
     </section>
 

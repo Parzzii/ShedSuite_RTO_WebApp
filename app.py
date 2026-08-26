@@ -2096,7 +2096,22 @@ def build_package(jp: Path):
                         z.write(p, p.relative_to(jp))
 
 
+def _ensure_row_uids(rows: list[dict]) -> bool:
+    """Give every contract a stable UI id so sorting never depends on row index."""
+    changed = False
+    seen: set[str] = set()
+    for r in rows:
+        uid = str(r.get('_row_uid', '') or '').strip()
+        if not uid or uid in seen:
+            uid = uuid.uuid4().hex
+            r['_row_uid'] = uid
+            changed = True
+        seen.add(uid)
+    return changed
+
+
 def save_job_rows(jp: Path, rows: list[dict]):
+    _ensure_row_uids(rows)
     # V7 serializes writes with the certificate worker so edits and background
     # PDF completion cannot overwrite one another.
     with _job_lock(jp.name):
@@ -2424,6 +2439,12 @@ def load_job(job: str):
         rows = json.loads(
             (jp / 'rows.json').read_text(encoding='utf-8')
         )
+        # V7.7 adds stable row ids for collapse/reorder actions. Older jobs can
+        # still be opened safely; only rows.json needs the metadata update.
+        if _ensure_row_uids(rows):
+            temp_rows = (jp / 'rows.json').with_suffix('.tmp')
+            temp_rows.write_text(json.dumps(rows, indent=2), encoding='utf-8')
+            temp_rows.replace(jp / 'rows.json')
 
     refs = (
         json.loads((jp / 'refs.json').read_text(encoding='utf-8'))
@@ -2960,28 +2981,49 @@ def save(job):
             )
         )
 
-    # V7.2: the certificate worker may have updated PDF metadata between the
-    # beginning of this POST and the moment we merge the browser payload. Read
-    # the freshest server rows once more so those background updates win.
+    # V7.7: cards can be reordered in the browser. Merge every submitted row
+    # by its permanent _row_uid instead of by list position, while still using
+    # the freshest server copy so background certificate/coordinate updates win.
     with _job_lock(job):
         try:
             latest_server_rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
-            old_ids = [str(x.get('_source_order_id', '') or '').strip() for x in old_rows]
-            latest_ids = [str(x.get('_source_order_id', '') or '').strip() for x in latest_server_rows]
-            if len(latest_server_rows) == len(old_rows) and latest_ids == old_ids:
+            _ensure_row_uids(latest_server_rows)
+            old_uids = {str(x.get('_row_uid', '') or '').strip() for x in old_rows}
+            latest_uids = {str(x.get('_row_uid', '') or '').strip() for x in latest_server_rows}
+            if len(latest_server_rows) == len(old_rows) and latest_uids == old_uids:
                 old_rows = latest_server_rows
         except Exception:
             pass
 
-    metadata = [
+    metadata = sorted({
         k
-        for k in old_rows[0].keys()
+        for old in old_rows
+        for k in old.keys()
         if k.startswith('_')
-    ] if old_rows else []
+    })
+
+    old_by_uid = {
+        str(old.get('_row_uid', '') or '').strip(): old
+        for old in old_rows
+        if str(old.get('_row_uid', '') or '').strip()
+    }
+    incoming_uids = [str(new.get('_row_uid', '') or '').strip() for new in incoming]
+    uid_merge = (
+        len(old_by_uid) == len(old_rows)
+        and all(incoming_uids)
+        and len(set(incoming_uids)) == len(incoming_uids)
+        and set(incoming_uids) == set(old_by_uid)
+    )
+
+    if uid_merge:
+        row_pairs = [(old_by_uid[uid], new) for uid, new in zip(incoming_uids, incoming)]
+    else:
+        # Compatibility fallback for jobs created before stable row ids existed.
+        row_pairs = list(zip(old_rows, incoming))
 
     rows = []
 
-    for old, new in zip(old_rows, incoming):
+    for old, new in row_pairs:
         r = {
             h: str(
                 new.get(
@@ -3079,6 +3121,46 @@ def api_model_tracker():
         tracker[key]['last_used'] = str(values.get('last_used', tracker[key].get('last_used', '')) or '').strip()
     save_model_tracker(tracker)
     return jsonify({'ok': True})
+
+
+@app.post('/api/reorder/<job>')
+def api_reorder_contracts(job):
+    """Persist the contract-card order without changing any contract data."""
+    jp = job_path(job)
+    if not (jp / 'rows.json').exists():
+        abort(404)
+
+    payload = request.get_json(silent=True) or {}
+    requested = payload.get('order', [])
+    if not isinstance(requested, list):
+        return jsonify({'ok': False, 'error': 'Invalid order payload.'}), 400
+    requested = [str(x or '').strip() for x in requested]
+    if not requested or any(not x for x in requested) or len(set(requested)) != len(requested):
+        return jsonify({'ok': False, 'error': 'Invalid or duplicate row ids.'}), 400
+
+    with _job_lock(job):
+        rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+        _ensure_row_uids(rows)
+        by_uid = {str(r.get('_row_uid', '') or '').strip(): r for r in rows}
+        if len(by_uid) != len(rows) or len(requested) != len(rows) or set(requested) != set(by_uid):
+            return jsonify({'ok': False, 'error': 'Contract list changed. Refresh and try sorting again.'}), 409
+        ordered = [by_uid[uid] for uid in requested]
+        save_job_rows(jp, ordered)
+
+    return jsonify({'ok': True, 'count': len(requested)})
+
+
+@app.post('/api/discard-row/<job>/<row_uid>')
+def api_discard_contract_uid(job, row_uid):
+    """Stable-id version of discard used by the sortable V7.7 review UI."""
+    _jp, rows, _refs, _warnings = load_job(job)
+    index = next(
+        (i for i, r in enumerate(rows) if str(r.get('_row_uid', '') or '').strip() == str(row_uid or '').strip()),
+        -1,
+    )
+    if index < 0:
+        return jsonify({'ok': False, 'error': 'Contract no longer exists.'}), 404
+    return api_discard_contract(job, index)
 
 
 @app.post('/api/discard/<job>/<int:index>')

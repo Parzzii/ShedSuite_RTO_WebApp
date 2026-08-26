@@ -177,3 +177,14 @@ The inventory CSV uses RTO Pro's inventory-receive field names and launches RTO 
 ## V7.6.2 — CSV + contract PDF intake
 
 Contracts can now be created from any mix of ShedSuite RTO report CSVs and supported digital RentaBarn-style contract PDFs. PDF values are converted into the same internal source schema and continue through the existing transform/review/RTO export pipeline. The uploaded PDF becomes that contract's combined packet, while only ShedSuite CSV rows participate in the background Delivery Certificate Chromium worker. A PDF marked USED also feeds the existing used-building suffix workflow automatically.
+
+
+## V7.7 — Collapsible + sortable contract review
+
+- Click a customer name/header to collapse or expand that contract.
+- Collapse All / Expand All controls reduce clutter in large batches.
+- Drag the handle beside a customer name to reorder contracts.
+- Up/down buttons provide a non-drag sorting option.
+- Sorting is persisted immediately and rebuilds CSV/XML/ZIP in the same order.
+- Stable per-row IDs keep Save, Discard, PDF, and background certificate updates attached to the correct contract after reordering.
+- Reordering is intentionally disabled while Search or Needs Review filtering is active; clear the filter to sort the full batch.
