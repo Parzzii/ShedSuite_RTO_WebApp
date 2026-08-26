@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -92,10 +93,12 @@ def effective_ziptax_api_key(explicit: str = '') -> str:
 KNOWN_STORES = [
     {'store': '1', 'storetitle': '1 Carefree', 'storename': 'Carefree'},
     {'store': '2', 'storetitle': '2 Dutch Boy', 'storename': 'Dutch Boy'},
+    {'store': '3', 'storetitle': '3 RentaBarn', 'storename': 'RentaBarn'},
     {'store': '6', 'storetitle': '6 RentaShed', 'storename': 'RentaShed'},
     {'store': '7', 'storetitle': '7 Lonestar', 'storename': 'Lonestar'},
     {'store': '8', 'storetitle': '8 Magnolia', 'storename': 'Magnolia'},
     {'store': '11', 'storetitle': '11 Westwood', 'storename': 'Westwood'},
+    {'store': '12', 'storetitle': '12 Choice Capital', 'storename': 'Choice Capital'},
 ]
 
 
@@ -306,6 +309,22 @@ def load_reference_data(dsn: str, user: str = '', password: str = '') -> Referen
 
 
 def company_rule(src: dict[str, str]) -> dict[str, str]:
+    # PDF contracts come from an RTO provider whose store is independent of the
+    # shed manufacturer.  Keep Company Name available for Brand/Vendor, but use
+    # the PDF provider to choose the RTO store.
+    if clean_text(src.get('_import_source_type')).casefold() == 'pdf':
+        provider = normalize_name(src.get('_pdf_provider'))
+        if 'rentabarn' in provider:
+            return {
+                'profile': '', 'login': '', 'store_title': '3 RentaBarn',
+                'store': '3', 'zone_selector': '',
+            }
+        if 'choicecapital' in provider:
+            return {
+                'profile': '', 'login': '', 'store_title': '12 Choice Capital',
+                'store': '12', 'zone_selector': '',
+            }
+
     company = clean_text(src.get('Company Name')).casefold()
     rule = dict(COMPANY_RULES.get(company, {}))
     if not rule:
@@ -353,41 +372,132 @@ def find_store_id(ref: ReferenceData, title: str, fallback: str = '') -> str:
     return m.group(1) if m else ''
 
 
-def find_zone(ref: ReferenceData, selector: str, store: str = '') -> str:
+def find_zone(ref: ReferenceData, selector: str, store: str = '', dealer_hint: str = '') -> str:
+    """Resolve the normal RTO zone.
+
+    Existing ShedSuite rows keep their exact selector behavior.  PDF rows often
+    have no workbook selector, so use the PDF dealer name to match a zone within
+    the already-selected store (substring/token/fuzzy), then fall back to the
+    only zone for that store when it is unambiguous.
+    """
     sf = clean_text(selector).casefold()
-    candidates = [r for r in ref.zones if clean_text(r.get('selector')).casefold() == sf]
-    if store:
-        store_candidates = [r for r in candidates if clean_text(r.get('store')) == clean_text(store)]
-        if store_candidates:
-            candidates = store_candidates
-    return clean_text(candidates[0].get('zone')) if candidates else ''
+    if sf and sf not in {'set manually', 'manual'}:
+        candidates = [r for r in ref.zones if clean_text(r.get('selector')).casefold() == sf]
+        if store:
+            store_candidates = [r for r in candidates if clean_text(r.get('store')) == clean_text(store)]
+            if store_candidates:
+                candidates = store_candidates
+        if candidates:
+            return clean_text(candidates[0].get('zone'))
+
+    store_rows = [r for r in ref.zones if not store or clean_text(r.get('store')) == clean_text(store)]
+    hint = clean_text(dealer_hint)
+    hn = normalize_name(hint)
+    if hint and store_rows:
+        # Strongest PDF match: the source dealer appears inside the RTO zone
+        # description/selector, e.g. "Endville Storage" ->
+        # "H&S / Endville Storage, 0305".
+        contained = [r for r in store_rows if hn and (hn in normalize_name(r.get('selector')) or hn in normalize_name(r.get('description')))]
+        if len(contained) == 1:
+            return clean_text(contained[0].get('zone'))
+
+        src_tokens = set(re.findall(r'[a-z0-9]+', hint.casefold())) - {'llc','inc','corp','corporation','company','co'}
+        token_matches = []
+        for r in store_rows:
+            text = f"{clean_text(r.get('description'))} {clean_text(r.get('selector'))}"
+            tokens = set(re.findall(r'[a-z0-9]+', text.casefold())) - {'llc','inc','corp','corporation','company','co'}
+            if src_tokens and src_tokens.issubset(tokens):
+                token_matches.append(r)
+        if len(token_matches) == 1:
+            return clean_text(token_matches[0].get('zone'))
+
+        scored = sorted(
+            ((SequenceMatcher(None, hn, normalize_name(f"{clean_text(r.get('description'))} {clean_text(r.get('selector'))}")).ratio(), r) for r in store_rows if hn),
+            key=lambda x: x[0], reverse=True,
+        )
+        if scored and scored[0][0] >= 0.68 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.08):
+            return clean_text(scored[0][1].get('zone'))
+
+    if len(store_rows) == 1:
+        return clean_text(store_rows[0].get('zone'))
+    return ''
 
 
 def normalize_name(v: Any) -> str:
     return re.sub(r'[^a-z0-9]+', '', clean_text(v).casefold())
 
 
+def _dealer_tokens(v: Any) -> set[str]:
+    return set(re.findall(r'[a-z0-9]+', clean_text(v).casefold())) - {
+        'llc', 'inc', 'incorporated', 'corp', 'corporation', 'company', 'co'
+    }
+
+
 def find_dealer(ref: ReferenceData, dealer: str, store: str = '') -> tuple[str, str]:
-    """Return dealer id and match note. Excel XLOOKUP matches dealer name only; we prefer selected store then fall back to exact name."""
+    """Return dealer id using exact, containment, token and fuzzy matching.
+
+    PDF dealer labels are frequently shorter than RTO Pro's display name, e.g.
+    "Endville Storage" versus "H&S / Endville Storage".  Prefer the selected
+    store, require a unique/strong result, and never guess on a close tie.
+    """
     name = clean_text(dealer)
     if not name:
         return '', 'blank source dealer'
-    exact = [r for r in ref.dealers if clean_text(r.get('companydealername')).casefold() == name.casefold()]
-    if store:
-        same = [r for r in exact if clean_text(r.get('store')) == clean_text(store)]
-        if len(same) == 1:
-            return clean_text(same[0].get('id')), 'exact name + store'
-    if len(exact) == 1:
-        return clean_text(exact[0].get('id')), 'exact name'
-    normalized = [r for r in ref.dealers if normalize_name(r.get('companydealername')) == normalize_name(name)]
-    if store:
-        same = [r for r in normalized if clean_text(r.get('store')) == clean_text(store)]
-        if len(same) == 1:
-            return clean_text(same[0].get('id')), 'normalized name + store'
-    if len(normalized) == 1:
-        return clean_text(normalized[0].get('id')), 'normalized name'
-    return '', 'no unique dealer match'
 
+    pool = list(ref.dealers)
+    if store:
+        same_store = [r for r in pool if clean_text(r.get('store')) == clean_text(store)]
+        if same_store:
+            pool = same_store
+
+    exact = [r for r in pool if clean_text(r.get('companydealername')).casefold() == name.casefold()]
+    if len(exact) == 1:
+        return clean_text(exact[0].get('id')), 'exact name' + (' + store' if store else '')
+
+    nn = normalize_name(name)
+    normalized = [r for r in pool if normalize_name(r.get('companydealername')) == nn]
+    if len(normalized) == 1:
+        return clean_text(normalized[0].get('id')), 'normalized name' + (' + store' if store else '')
+
+    # A very common PDF case: source name is a meaningful suffix/piece of the
+    # RTO dealer name.
+    contained = [
+        r for r in pool
+        if nn and len(nn) >= 5 and (nn in normalize_name(r.get('companydealername')) or normalize_name(r.get('companydealername')) in nn)
+    ]
+    if len(contained) == 1:
+        return clean_text(contained[0].get('id')), 'dealer substring match' + (' + store' if store else '')
+
+    src_tokens = _dealer_tokens(name)
+    token_matches = []
+    for r in pool:
+        cand_tokens = _dealer_tokens(r.get('companydealername'))
+        if src_tokens and src_tokens.issubset(cand_tokens):
+            token_matches.append(r)
+    if len(token_matches) == 1:
+        return clean_text(token_matches[0].get('id')), 'dealer token match' + (' + store' if store else '')
+
+    scored = sorted(
+        ((SequenceMatcher(None, nn, normalize_name(r.get('companydealername'))).ratio(), r) for r in pool if nn),
+        key=lambda x: x[0], reverse=True,
+    )
+    if scored:
+        best_score, best = scored[0]
+        next_score = scored[1][0] if len(scored) > 1 else 0.0
+        if best_score >= 0.72 and best_score - next_score >= 0.08:
+            return clean_text(best.get('id')), f'fuzzy dealer match {best_score:.2f}' + (' + store' if store else '')
+
+    # If store filtering produced no confident result, allow a globally unique
+    # exact/normalized match as a compatibility fallback.
+    if store:
+        global_exact = [r for r in ref.dealers if clean_text(r.get('companydealername')).casefold() == name.casefold()]
+        if len(global_exact) == 1:
+            return clean_text(global_exact[0].get('id')), 'exact name (other store)'
+        global_norm = [r for r in ref.dealers if normalize_name(r.get('companydealername')) == nn]
+        if len(global_norm) == 1:
+            return clean_text(global_norm[0].get('id')), 'normalized name (other store)'
+
+    return '', 'no confident dealer match'
 
 def dealer_name_for_id(ref: ReferenceData, dealer_id: str) -> str:
     for r in ref.dealers:
@@ -687,7 +797,8 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
         store = find_store_id(ref, rule.get('store_title', ''), rule.get('store', ''))
         store_title = rule.get('store_title', '')
         zone_selector = rule.get('zone_selector', '')
-        zone = find_zone(ref, zone_selector, store)
+        is_pdf_source = clean_text(src.get('_import_source_type')).casefold() == 'pdf'
+        zone = find_zone(ref, zone_selector, store, src.get('Dealer', '') if is_pdf_source else '')
         stock_model = find_stock_model(ref, serial)
         default_model = stock_model or inventory_id or 'Not Found'
         default_contract_check = order_id
@@ -792,11 +903,9 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
             'AGENT1': agent,
             'CATEGORY1': category_for(src, categories),
             'RETAIL1': numstr(src.get('Building Cost')) if parse_money(src.get('Building Cost')) else '',
-            # Do not send the generated OTHER IS note through the CSV COMMENTS
-            # field.  RTO Pro displays that as an application comment on the
-            # pending-app screen.  V7.9 keeps it as customer-comment metadata
-            # and syncs it to CUSTOMERS.COMMENTS after the account is created.
-            'COMMENTS': '',
+            # Keep the familiar V7.8 behavior: pre-fill OTHER IS... directly
+            # in the RTO import comment so there is no extra post-import step.
+            'COMMENTS': comment,
             'CONDITION1': '',
         })
 

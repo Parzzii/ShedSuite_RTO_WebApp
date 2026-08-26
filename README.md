@@ -1,3 +1,7 @@
+## V7.10 PDF/store/dealer/payment correction
+
+See `README_V7.10.txt` for the new PDF store, dealer, zone, rental-rate, and restored comment behavior.
+
 ## V7.9 phone + customer-comment correction
 
 - RTO `PHONE5` (Other phone) is explicitly exported with `CELLOPT2=3`, which RTO Pro documents as **cell number + opted out of SMS**.

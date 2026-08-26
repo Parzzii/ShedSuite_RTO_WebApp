@@ -1156,12 +1156,12 @@ def _open_rto_connection(dsn: str, user: str, password: str):
 
 
 def _prepare_phone_and_customer_comment(row: dict) -> None:
-    """Keep SMS flags and the generated OTHER IS note in the intended places.
+    """Normalize phones, opt PHONE5 out of SMS, and keep OTHER IS visible.
 
-    RTO Pro documents CELLOPT2=3 as: PHONE5 is a cell number and is opted out
-    of SMS.  The generated OTHER IS note is intentionally kept out of the
-    import COMMENTS field because that field is shown as an application comment
-    during pending-web-application review.
+    V7.10 restores the low-touch V7.8 behavior: the generated OTHER IS note is
+    pre-filled in the normal import COMMENTS field so the user does not need a
+    second Firebird comment-sync step.  CELLOPT2=3 remains the newer rule for
+    the Other phone (cell number, opted out of SMS).
     """
     other_phone = phone(row.get('PHONE5', ''))
     row['PHONE5'] = other_phone
@@ -1177,8 +1177,8 @@ def _prepare_phone_and_customer_comment(row: dict) -> None:
     if not customer_comment and re.match(r'^OTHER\s+IS\b', app_comment, flags=re.I):
         row['_customer_comment'] = app_comment
         customer_comment = app_comment
-    if customer_comment and re.match(r'^OTHER\s+IS\b', app_comment, flags=re.I):
-        row['COMMENTS'] = ''
+    if not app_comment and customer_comment:
+        row['COMMENTS'] = customer_comment
 
 
 def _normal_customer_comment(existing: str, generated: str) -> str:
@@ -1375,10 +1375,8 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
             r['_rto_contract_found'] = matched_contract
             matched += 1
 
-    # V7.9: the generated OTHER IS note belongs in the normal customer comment
-    # field below Directions, not in the pending application's comments box.
-    comment_sync = sync_customer_comments_to_rto(dsn, user, password, rows)
-
+    # V7.10: OTHER IS is already carried in the import COMMENTS field again.
+    # Refresh only needs to pull the new account/reference data.
     save_job_rows(jp, rows)
 
     (jp / 'last_rto_refresh.json').write_text(
@@ -1396,9 +1394,9 @@ def refresh_job_from_rto(jp: Path, rows: list[dict]) -> dict:
     return {
         'contracts_read': len(contract_accounts),
         'accounts_matched': matched,
-        'customer_comments_synced': int(comment_sync.get('synced', 0)),
-        'customer_comments_skipped': int(comment_sync.get('skipped', 0)),
-        'customer_comment_errors': list(comment_sync.get('errors', [])),
+        'customer_comments_synced': 0,
+        'customer_comments_skipped': 0,
+        'customer_comment_errors': [],
         'refs': refs,
     }
 
@@ -1594,7 +1592,7 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
       <form method="post"
             action="{url_for('refresh_rto', job=job)}">
         <button class="workflow-button workflow-refresh" type="submit">
-          2. Refresh RTO Data + Sync Comment
+          2. Refresh RTO Data
         </button>
       </form>
 
@@ -1615,8 +1613,8 @@ def workflow_panel_html(job: str, rows: list[dict], refs: dict) -> str:
     <div class="workflow-help">
       After RTO Pro shows its successful import confirmation, click
       <b>Refresh RTO Data</b>. That reads the updated Firebird tables,
-      fills assigned account numbers, refreshes last-used model numbers, and syncs the
-      <b>OTHER IS...</b> note into the normal customer comment box below Directions.
+      fills assigned account numbers and refreshes last-used model numbers.
+      The <b>OTHER IS...</b> comment is already included in the import, so there is no extra comment-sync step.
       Then click <b>Import PDFs to RTO Imaging</b>.
     </div>
   </div>
@@ -2870,6 +2868,22 @@ def process():
             if pdf_email_invoice in {'0', '1'}:
                 r['EMAILINV'] = pdf_email_invoice
 
+            # If the PDF prints an RTO tax code that exactly exists in the live
+            # tax-zone table, use it immediately. Otherwise the normal ZipTax
+            # address resolver remains authoritative.
+            pdf_tax_code = str(src_for_file.get('_pdf_tax_code', '') or '').strip()
+            if pdf_tax_code:
+                code_match = re.search(r'(?:ZONE\s*[:#-]?\s*)?([A-Za-z0-9-]+)\s*$', pdf_tax_code, flags=re.I)
+                code = code_match.group(1) if code_match else pdf_tax_code
+                candidates = [
+                    t for t in ref.taxzones
+                    if str(t.get('zone', '') or '').strip().casefold() == code.casefold()
+                    and (not str(r.get('del_state', '') or '').strip() or str(t.get('state', '') or '').strip().upper() == str(r.get('del_state', '') or '').strip().upper())
+                ]
+                if len(candidates) == 1:
+                    r['TAXZONE'] = str(candidates[0].get('zone', '') or '').strip()
+                    r['TAXRATE'] = str(candidates[0].get('taxrate', '') or '').strip()
+
             if str(src_for_file.get('Date Created', '') or '').strip():
                 r['CONTRACTDATE'] = str(src_for_file.get('Date Created', '') or '').strip()
             r['CONDITION1'] = str(src_for_file.get('Condition', '') or '').strip().upper()
@@ -2879,7 +2893,7 @@ def process():
                 '_pdf_sac_date', '_pdf_sac_source', '_pdf_agreement_number',
                 '_pdf_pmt_before_tax', '_pdf_total_monthly_pmt', '_pdf_total_tax',
                 '_pdf_ldw', '_pdf_security_deposit', '_pdf_purchase_reserve',
-                '_pdf_paperless_billing', '_pdf_email_invoice',
+                '_pdf_paperless_billing', '_pdf_email_invoice', '_pdf_provider', '_pdf_tax_code',
             ]:
                 r[meta_key] = str(src_for_file.get(meta_key, '') or '').strip()
     warnings.extend('Input: ' + x for x in input_warnings)
@@ -3646,8 +3660,7 @@ def refresh_rto(job):
         flash(
             f"RTO data refreshed: "
             f"{result['contracts_read']} contracts read; "
-            f"{result['accounts_matched']} account number(s) matched; "
-            f"{result.get('customer_comments_synced', 0)} customer comment(s) synced. "
+            f"{result['accounts_matched']} account number(s) matched. "
             "Last-used model numbers were refreshed from Firebird.",
             'ok',
         )

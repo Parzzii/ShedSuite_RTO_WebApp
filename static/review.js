@@ -243,7 +243,7 @@
   function sourceMatchText(r) {
     const selected = findDealerName(r.DEALERID) || clean(r._dealer_name);
     if (!clean(r._source_dealer)) return '';
-    if (selected && norm(selected) === norm(r._source_dealer)) return '<span class="match good">✓ source dealer matched</span>';
+    if (selected && (norm(selected) === norm(r._source_dealer) || norm(selected).includes(norm(r._source_dealer)) || norm(r._source_dealer).includes(norm(selected)))) return '<span class="match good">✓ source dealer matched</span>';
     if (selected) return `<span class="match warn">Selected: ${esc(selected)}</span>`;
     return '<span class="match warn">Dealer needs mapping</span>';
   }
@@ -366,6 +366,7 @@
           <div class="reference-card"><strong>Reference 1</strong><div class="mapping-grid ref-fields">${inputField(i,'REFERENCE1','Name')}${inputField(i,'REFRELATION1','Relationship')}${inputField(i,'REFPHONE1','Phone')}</div></div>
           <div class="reference-card"><strong>Reference 2</strong><div class="mapping-grid ref-fields">${inputField(i,'REFERENCE2','Name')}${inputField(i,'REFRELATION2','Relationship')}${inputField(i,'REFPHONE2','Phone')}</div></div>
         </div>
+        ${textareaField(i,'COMMENTS','Comment box',{rows:2,wide:true,small:'Automatically says OTHER IS + relationship + name. Other phone remains opted out of SMS.'})}
       </section>
     </div>`;
   }
@@ -588,7 +589,6 @@
         <div class="pdf-payment-note">RTO Pro receives the item rental rate in RATE1, LDW separately in GRP, and calculates the taxed monthly total. PMT is intentionally 0.00 when inventory RATE1 is supplied.</div>
       </section>`:''}
       ${textareaField(i,'DIRECTIONS','Directions / coordinates',{rows:4,wide:true})}
-      ${helperTextarea(i,'_customer_comment','Customer comment (below Directions in RTO Pro)',{rows:2,wide:true,small:clean(r._customer_comment_sync_status)?r._customer_comment_sync_status:'The OTHER IS note is synced to the normal RTO customer comment after Refresh RTO Data.'})}
       <div class="pdf-note">The Invoice PDF is now always included in the download set because that is where ShedSuite commonly stores the <strong>Agent:</strong> field.</div>
     </div>`;
   }
@@ -749,9 +749,13 @@
   function remapDealerForStore(i) {
     const r=rows[i];
     const candidates=dealers.filter(d=>dealerStore(d)===clean(r.STORE));
-    const exact=candidates.filter(d=>norm(dealerName(d))===norm(r._source_dealer));
-    if (exact.length===1) {
-      r.DEALERID=dealerId(exact[0]); r._dealer_name=dealerName(exact[0]);
+    const src=norm(r._source_dealer);
+    let matches=candidates.filter(d=>norm(dealerName(d))===src);
+    if (matches.length!==1 && src) {
+      matches=candidates.filter(d=>{ const dn=norm(dealerName(d)); return dn.includes(src) || src.includes(dn); });
+    }
+    if (matches.length===1) {
+      r.DEALERID=dealerId(matches[0]); r._dealer_name=dealerName(matches[0]);
     } else {
       r.DEALERID=''; r._dealer_name='';
     }
@@ -773,9 +777,8 @@
     else if (source==='ref2') r.PHONE5=clean(r.REFPHONE2);
     else r.PHONE5=clean(r._secondary_phone);
     r.CELLOPT2=clean(r.PHONE5)?'3':'';
-    r._customer_comment=phoneCommentFor(r,source);
-    r._customer_comment_sync_status='Waiting for RTO account';
-    if (/^OTHER\s+IS\b/i.test(clean(r.COMMENTS))) r.COMMENTS='';
+    r.COMMENTS=phoneCommentFor(r,source);
+    r._customer_comment=r.COMMENTS;
   }
 
   function applyPhoneRule(i, forceAuto=false) {

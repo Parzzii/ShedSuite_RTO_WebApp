@@ -362,6 +362,47 @@ def _sum_rates(*values: str) -> str:
     return (f'{total:.6f}'.rstrip('0').rstrip('.')) if found else ''
 
 
+
+
+def _detect_pdf_provider(text: str) -> str:
+    compact = re.sub(r'[^a-z0-9]+', '', _clean(text).casefold())
+    if 'choicecapital' in compact:
+        return 'CHOICE CAPITAL'
+    if 'rentabarn' in compact:
+        return 'RENTABARN'
+    return ''
+
+
+def _value_right_of_label(doc: fitz.Document, label: str) -> str:
+    """Read the value visually to the right of an exact PDF label.
+
+    This is used as an authoritative fallback for critical payment fields.
+    Table extraction can occasionally combine the left/right halves of the
+    form; locating the printed label rectangle and reading words on the same
+    baseline avoids pulling a neighboring numeric value.
+    """
+    for page in doc:
+        try:
+            hits = page.search_for(label)
+            words = page.get_text('words') or []
+        except Exception:
+            continue
+        for rect in hits:
+            same_line = []
+            cy = (rect.y0 + rect.y1) / 2.0
+            for w in words:
+                x0, y0, x1, y1, text = w[:5]
+                wy = (y0 + y1) / 2.0
+                # PDF table text can be a few points off vertically, so use a
+                # forgiving baseline window but only accept words to the right.
+                if x0 >= rect.x1 - 1 and abs(wy - cy) <= max(6.0, rect.height * 0.8):
+                    same_line.append((x0, _clean(text)))
+            same_line.sort(key=lambda x: x[0])
+            value = _clean(' '.join(t for _, t in same_line if t))
+            if value:
+                return value
+    return ''
+
 def _looks_supported(text: str) -> bool:
     t = _key(text)
     signatures = [
@@ -386,8 +427,9 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
         if not _clean(full_text):
             raise ValueError('PDF has no selectable text. Export/download the original digital PDF instead of a scan or screenshot.')
         if not _looks_supported(full_text):
-            raise ValueError('PDF is not recognized as the supported RentaBarn-style contract format.')
+            raise ValueError('PDF is not recognized as the supported RentaBarn/Choice Capital-style contract format.')
 
+        pdf_provider = _detect_pdf_provider(full_text)
         extracted = _extract_tables(doc)
         if not extracted:
             extracted = _extract_text_sections(doc)
@@ -450,13 +492,16 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
         term = _get(fields, 'contract', 'RTO Terms')
         city_tax = _get(fields, 'contract', 'City Tax')
         county_tax = _get(fields, 'contract', 'County Tax')
-        ldw = _money(_get(fields, 'contract', 'LDW'))
-        pmt_before_tax = _money(_get(fields, 'contract', 'PMT Before Tax'))
-        total_monthly_pmt = _money(_get(fields, 'contract', 'Total Monthly PMT'))
-        total_tax = _money(_get(fields, 'contract', 'Total Tax'))
+        # Critical payment values: prefer the value printed on the same visual
+        # row as the label. This prevents a four-column PDF table from shifting
+        # PMT Before Tax onto LDW/Total Tax/another neighboring number.
+        ldw = _money(_value_right_of_label(doc, 'LDW') or _get(fields, 'contract', 'LDW'))
+        pmt_before_tax = _money(_value_right_of_label(doc, 'PMT Before Tax') or _get(fields, 'contract', 'PMT Before Tax'))
+        total_monthly_pmt = _money(_value_right_of_label(doc, 'Total Monthly PMT') or _get(fields, 'contract', 'Total Monthly PMT'))
+        total_tax = _money(_value_right_of_label(doc, 'Total Tax') or _get(fields, 'contract', 'Total Tax'))
         cash_price = _money(_get(fields, 'unit', 'Cash Price') or _get(fields, 'contract', 'Cash Price'))
-        security = _money(_get(fields, 'contract', 'Security Deposit'))
-        reserve = _money(_get(fields, 'contract', 'Purchase Reserve'))
+        security = _money(_value_right_of_label(doc, 'Security Deposit') or _get(fields, 'contract', 'Security Deposit'))
+        reserve = _money(_value_right_of_label(doc, 'Purchase Reserve') or _get(fields, 'contract', 'Purchase Reserve'))
         initial = _amount_in_parentheses(_get(fields, 'contract', 'Initial Payment Type'))
         condition = _get(fields, 'unit', 'New or Used')
         paperless_billing = _get(fields, 'contract', 'Paperless Billing')
@@ -534,6 +579,7 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             'Co Renter Identification Card Scan': '',
             '_import_source_type': 'pdf',
             '_import_pdf_name': path.name,
+            '_pdf_provider': pdf_provider,
             '_pdf_salesperson_source': salesperson,
             '_pdf_contract_price': _money(_get(fields, 'contract', 'Contract Price')),
             '_pdf_sac_date': sac_date,
@@ -585,7 +631,7 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             warnings.append(f'{path.name}: salesperson extracted from PDF: {salesperson}.')
 
         metadata = {
-            'provider': 'RentaBarn PDF',
+            'provider': (pdf_provider.title() + ' PDF') if pdf_provider else 'Contract PDF',
             'filename': path.name,
             'agreement': agreement,
             'manufacturer_original': manufacturer_raw,
