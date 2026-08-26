@@ -44,6 +44,37 @@ def _percentage(value: str) -> str:
     return m.group(1) if m else ''
 
 
+def _date_from_value(value: str) -> str:
+    """Extract an explicit m/d/yyyy date from a mixed label value.
+
+    RentaBarn's 90 Days SAC row is commonly formatted like
+    ``YES (10/13/2026)``.  That parenthesized date is authoritative; do not
+    recompute it from Contract Date.
+    """
+    s = _clean(value)
+    m = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b', s)
+    if not m:
+        return ''
+    return f'{int(m.group(1)):02d}/{int(m.group(2)):02d}/{m.group(3)}'
+
+
+def _normalize_size(value: str) -> str:
+    """Normalize shed dimensions to the compact RTO form (e.g. 10x12)."""
+    s = _clean(value).lower().replace('×', 'x')
+    # Feet/inch marks and words are display noise for MODEL/DESCRIPTION mapping.
+    s = s.replace('′', '').replace('″', '').replace("'", '').replace('\"', '')
+    s = re.sub(r'\b(?:ft|feet|foot|in|inch|inches)\b', '', s, flags=re.I)
+    nums = re.findall(r'\d+(?:\.\d+)?', s)
+    if len(nums) >= 2:
+        return 'x'.join(nums)
+    # If the source is already a compact non-standard dimension, at least strip spaces.
+    return re.sub(r'\s+', '', s)
+
+
+def _yes(value: str) -> bool:
+    return _key(value) in {'yes', 'y', 'true', '1', 'on'}
+
+
 def _amount_in_parentheses(value: str) -> str:
     s = _clean(value)
     matches = re.findall(r'\$\s*([0-9][0-9,]*(?:\.\d+)?)', s)
@@ -108,7 +139,15 @@ def _table_scope(rows: list[list[str]]) -> str:
             return scope
     if 'new or used' in keys or 'manufacturer' in keys or 'serial' in keys or 'serial number' in keys:
         return 'unit'
-    if '90 days sac' in joined or 'agreement' in joined or 'salesperson' in keys or 'order type' in keys:
+    contract_markers = {
+        '90 days sac', 'agreement', 'agreement number', 'dealer', 'salesperson',
+        'rto terms', 'contract date', 'county of delivery', 'city tax',
+        'county tax', 'tax code', 'total tax', 'pmt before tax', 'ldw',
+        'total monthly pmt', 'contract price', 'security deposit',
+        'purchase reserve', 'initial payment type', 'auto pay',
+        'paperless billing', 'order type',
+    }
+    if any(marker in keys for marker in contract_markers) or '90 days sac' in joined or 'agreement' in joined:
         return 'contract'
     if 'mailing address' in keys or 'physical address' in keys or 'paperless bill email' in keys:
         return 'customer'
@@ -140,27 +179,91 @@ def _pairs_from_table(rows: list[list[Any]]) -> list[tuple[str, str]]:
 
 
 def _extract_tables(doc: fitz.Document) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Extract label/value pairs without mixing side-by-side sections.
+
+    Some real RentaBarn PDFs are detected by PyMuPDF as one four-column table
+    (Customer label/value on the left, Unit/Contract label/value on the right).
+    The old parser assigned one scope to the entire table, which could shift
+    nearly every numeric field.  Track the section heading independently for
+    each label/value column pair instead.
+    """
     result: list[tuple[str, list[tuple[str, str]]]] = []
     contact_index = 0
+
     for page in doc:
         try:
             finder = page.find_tables()
             tables = getattr(finder, 'tables', []) or []
         except Exception:
             tables = []
+
         for table in tables:
             try:
-                matrix = table.extract() or []
+                raw_matrix = table.extract() or []
             except Exception:
                 continue
-            matrix = [[_clean(x) for x in (row or [])] for row in matrix]
-            scope = _table_scope(matrix)
-            pairs = _pairs_from_table(matrix)
-            if scope == 'contact':
-                contact_index += 1
-                scope = 'ref1' if contact_index == 1 else 'ref2'
-            if pairs:
-                result.append((scope, pairs))
+            matrix = [[_clean(x) for x in (row or [])] for row in raw_matrix]
+            if not matrix:
+                continue
+
+            ncols = max((len(row) for row in matrix), default=0)
+            if ncols <= 2:
+                scope = _table_scope(matrix)
+                pairs = _pairs_from_table(matrix)
+                if scope == 'contact':
+                    contact_index += 1
+                    scope = 'ref1' if contact_index == 1 else 'ref2'
+                if pairs:
+                    result.append((scope, pairs))
+                continue
+
+            # Multi-section / side-by-side table. Keep empty cells so columns do
+            # not collapse and cause label/value drift.
+            pair_count = (ncols + 1) // 2
+            pair_scopes = [''] * pair_count
+            buckets: dict[str, list[tuple[str, str]]] = {}
+
+            for raw_row in matrix:
+                row = list(raw_row) + [''] * (ncols - len(raw_row))
+                for pair_i in range(pair_count):
+                    label_i = pair_i * 2
+                    value_i = label_i + 1
+                    label = _clean(row[label_i]) if label_i < len(row) else ''
+                    value = _clean(row[value_i]) if value_i < len(row) else ''
+
+                    # A section heading can occupy either cell of a pair.
+                    heading_scope = ''
+                    for candidate in (label, value):
+                        ck = _key(candidate)
+                        if ck in SECTION_NAMES:
+                            heading_scope = SECTION_NAMES[ck]
+                            break
+                    if heading_scope:
+                        if heading_scope == 'contact':
+                            contact_index += 1
+                            heading_scope = 'ref1' if contact_index == 1 else 'ref2'
+                        pair_scopes[pair_i] = heading_scope
+                        continue
+
+                    if not label or not value:
+                        continue
+
+                    scope = pair_scopes[pair_i]
+                    if not scope:
+                        # Infer only from this pair's label/value—not all columns.
+                        scope = _table_scope([[label, value]])
+                        if scope == 'contact':
+                            contact_index += 1
+                            scope = 'ref1' if contact_index == 1 else 'ref2'
+                        if scope:
+                            pair_scopes[pair_i] = scope
+
+                    buckets.setdefault(scope, []).append((label, value))
+
+            for scope, pairs in buckets.items():
+                if pairs:
+                    result.append((scope, pairs))
+
     return result
 
 
@@ -196,20 +299,9 @@ def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str
             i += 1
             continue
 
-        # Try "known label + value" on one line.
-        matched = False
-        for label in sorted(known_labels, key=len, reverse=True):
-            pattern = re.compile(r'^' + re.escape(label).replace(r'\ ', r'\s+') + r'\s*[:#-]?\s+(.+)$', re.I)
-            m = pattern.match(line)
-            if m and _clean(m.group(1)):
-                buckets.setdefault(scope, []).append((label, m.group(1)))
-                matched = True
-                break
-        if matched:
-            i += 1
-            continue
-
-        # Alternating extraction: label on one line, value on the next.
+        # Alternating extraction: exact label on one line, value on the next.
+        # Do this BEFORE the inline matcher so labels such as "Agreement #" or
+        # "Serial #" are not misread as label="Agreement", value="#".
         if lk in known_labels and i + 1 < len(lines):
             nxt = lines[i + 1]
             nk = _key(nxt)
@@ -217,6 +309,19 @@ def _extract_text_sections(doc: fitz.Document) -> list[tuple[str, list[tuple[str
                 buckets.setdefault(scope, []).append((line, nxt))
                 i += 2
                 continue
+
+        # Try "known label + value" on one line.
+        matched = False
+        for label in sorted(known_labels, key=len, reverse=True):
+            pattern = re.compile(r'^' + re.escape(label).replace(r'\ ', r'\s+') + r'\s*[:#-]?\s+(.+)$', re.I)
+            m = pattern.match(line)
+            if m and _clean(m.group(1)) and _clean(m.group(1)) not in {'#', ':', '-'}:
+                buckets.setdefault(scope, []).append((label, m.group(1)))
+                matched = True
+                break
+        if matched:
+            i += 1
+            continue
         i += 1
     for s, pairs in buckets.items():
         if pairs:
@@ -325,7 +430,7 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
         model = _get(fields, 'unit', 'Model #', 'Model Number', 'Model')
         style = _get(fields, 'unit', 'Style')
         unit_type = _get(fields, 'unit', 'Unit Type')
-        size = _get(fields, 'unit', 'Size')
+        size = _normalize_size(_get(fields, 'unit', 'Size'))
         desc = _get(fields, 'unit', 'Description')
         # RentaBarn commonly appends the generic word "Shed" (e.g.
         # "Side Utility Shed") while the existing category map uses
@@ -340,16 +445,21 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
         dealer = _get(fields, 'contract', 'Dealer')
         salesperson = _get(fields, 'contract', 'Salesperson')
         contract_date = _get(fields, 'contract', 'Contract Date')
+        sac_raw = _get(fields, 'contract', '90 Days SAC')
+        sac_date = _date_from_value(sac_raw)
         term = _get(fields, 'contract', 'RTO Terms')
         city_tax = _get(fields, 'contract', 'City Tax')
         county_tax = _get(fields, 'contract', 'County Tax')
         ldw = _money(_get(fields, 'contract', 'LDW'))
         pmt_before_tax = _money(_get(fields, 'contract', 'PMT Before Tax'))
+        total_monthly_pmt = _money(_get(fields, 'contract', 'Total Monthly PMT'))
+        total_tax = _money(_get(fields, 'contract', 'Total Tax'))
         cash_price = _money(_get(fields, 'unit', 'Cash Price') or _get(fields, 'contract', 'Cash Price'))
         security = _money(_get(fields, 'contract', 'Security Deposit'))
         reserve = _money(_get(fields, 'contract', 'Purchase Reserve'))
         initial = _amount_in_parentheses(_get(fields, 'contract', 'Initial Payment Type'))
         condition = _get(fields, 'unit', 'New or Used')
+        paperless_billing = _get(fields, 'contract', 'Paperless Billing')
 
         emp_city, emp_state, emp_zip = _split_city_state_zip(_get(fields, 'employer', 'City/State/Zip', 'City State Zip'))
         due_day = _get(fields, 'employer', 'Due Day of Month')
@@ -426,13 +536,21 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             '_import_pdf_name': path.name,
             '_pdf_salesperson_source': salesperson,
             '_pdf_contract_price': _money(_get(fields, 'contract', 'Contract Price')),
-            '_pdf_total_monthly_pmt': _money(_get(fields, 'contract', 'Total Monthly PMT')),
-            '_pdf_total_tax': _money(_get(fields, 'contract', 'Total Tax')),
+            '_pdf_sac_date': sac_date,
+            '_pdf_sac_source': sac_raw,
+            '_pdf_agreement_number': agreement,
+            '_pdf_pmt_before_tax': pmt_before_tax,
+            '_pdf_total_monthly_pmt': total_monthly_pmt,
+            '_pdf_total_tax': total_tax,
+            '_pdf_ldw': ldw,
+            '_pdf_security_deposit': security,
+            '_pdf_purchase_reserve': reserve,
             '_pdf_county_of_delivery': _get(fields, 'contract', 'County of Delivery'),
             '_pdf_tax_code': _get(fields, 'contract', 'Tax Code'),
             '_pdf_order_type': _get(fields, 'contract', 'Order Type'),
             '_pdf_auto_pay': _get(fields, 'contract', 'Auto Pay'),
-            '_pdf_paperless_billing': _get(fields, 'contract', 'Paperless Billing'),
+            '_pdf_paperless_billing': paperless_billing,
+            '_pdf_email_invoice': '1' if _yes(paperless_billing) else ('0' if _key(paperless_billing) in {'no', 'n', 'false', '0', 'off'} else ''),
             '_pdf_landlord_name': _get(fields, 'landlord', 'Name'),
             '_pdf_landlord_phone': _get(fields, 'landlord', 'Phone'),
             '_pdf_landlord_address': _get(fields, 'landlord', 'Address'),
@@ -457,6 +575,12 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             warnings.append(f'{path.name}: PDF parser could not find dealer; choose the dealer/store on review.')
         if not model:
             warnings.append(f'{path.name}: PDF parser could not find Model #; review MODEL1 manually.')
+        if not sac_date:
+            warnings.append(f'{path.name}: PDF parser could not find the date inside 90 Days SAC; review SACDATE manually.')
+        if not pmt_before_tax:
+            warnings.append(f'{path.name}: PDF parser could not find PMT Before Tax; review RATE1 manually.')
+        if not total_monthly_pmt:
+            warnings.append(f'{path.name}: PDF parser could not find Total Monthly PMT; verify the final RTO payment manually.')
         if salesperson:
             warnings.append(f'{path.name}: salesperson extracted from PDF: {salesperson}.')
 

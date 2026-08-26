@@ -188,3 +188,15 @@ Contracts can now be created from any mix of ShedSuite RTO report CSVs and suppo
 - Sorting is persisted immediately and rebuilds CSV/XML/ZIP in the same order.
 - Stable per-row IDs keep Save, Discard, PDF, and background certificate updates attached to the correct contract after reordering.
 - Reordering is intentionally disabled while Search or Needs Review filtering is active; clear the filter to sort the full batch.
+
+
+## V7.8 — RentaBarn PDF field mapping corrections
+
+- 90 Days SAC now uses the explicit date printed in the PDF (for example `YES (10/13/2026)` -> `10/13/2026`).
+- Agreement # is the PDF contract number. Used PDF contracts suffix the Agreement # rather than MODEL1.
+- Size is normalized to compact dimensions such as `10x12` with no spaces or foot/inch marks.
+- Paperless Billing = YES maps to RTO Pro `EMAILINV=1`; NO maps to `0`.
+- Security Deposit maps to `EXTRARENT`, and Purchase Reserve maps to `PAIDDOWN`, matching the existing ShedSuite path.
+- PMT Before Tax maps directly to inventory `RATE1`; LDW remains separate in `GRP`. PDF imports set agreement-level `PMT=0.00` because RTO Pro requires the individual inventory rate when inventory is included.
+- Total Monthly PMT from the PDF is retained as a review/audit value so the final taxed payment can be verified.
+- Table extraction was hardened for real PDFs that expose left/right sections as one multi-column table, preventing numeric label/value drift.

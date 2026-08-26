@@ -142,9 +142,14 @@
     return v === true || ['1','true','yes','on'].includes(clean(v).toLowerCase());
   }
 
+  function usedBaseContract(r) {
+    if (clean(r._source_type).toLowerCase()==='pdf') return clean(r._source_order_id || r._used_base_contract || r.CONTRACT);
+    return clean(r.MODEL1 || r._used_base_contract);
+  }
+
   function usedSuffixState(i, suffix) {
     const r=rows[i];
-    const model=clean(r.MODEL1);
+    const model=usedBaseContract(r);
     suffix=clean(suffix).toUpperCase();
     if (!model) return {contract:'',suffix,error:'Used building needs a model number.',taken:false};
     if (!suffix) return {contract:model,suffix,error:'Type a suffix for this used building.',taken:false};
@@ -180,7 +185,7 @@
     r._used_suffix_manual=true;
     r._used_contract_suffix=state.suffix;
     r._used_contract_error=state.error;
-    r._used_base_contract=clean(r.MODEL1);
+    r._used_base_contract=usedBaseContract(r);
     if (state.contract) r.CONTRACT=state.contract;
   }
 
@@ -190,7 +195,7 @@
     const preserveManual=boolish(r._used_suffix_manual) && !!preferredSuffix;
     r._used_building=!!enabled;
     if (manual) r._used_manual_override=true;
-    r._used_base_contract=clean(r.MODEL1);
+    r._used_base_contract=usedBaseContract(r);
     r._used_contract_error='';
     if (enabled) {
       if (preserveManual) {
@@ -212,8 +217,8 @@
         r._used_contract_error=choice.error;
       }
     } else {
-      // Normal V3/V6 behavior: contract follows the building model.
-      r.CONTRACT=clean(r.MODEL1);
+      // Normal ShedSuite behavior follows MODEL1; PDF contracts use Agreement #.
+      r.CONTRACT=clean(r._source_type).toLowerCase()==='pdf' ? clean(r._source_order_id) : clean(r.MODEL1);
       r._used_contract_suffix='';
       r._used_suffix_manual=false;
     }
@@ -228,7 +233,7 @@
     if (!clean(r.ZONE)) p.push('Zone');
     if (!clean(r.TAXZONE)) p.push('Tax zone');
     if (boolish(r._used_building)) {
-      const model=clean(r.MODEL1).toUpperCase(), contract=clean(r.CONTRACT).toUpperCase();
+      const model=usedBaseContract(r).toUpperCase(), contract=clean(r.CONTRACT).toUpperCase();
       const suffix=(model && contract.startsWith(model)) ? contract.slice(model.length) : '';
       if (clean(r._used_contract_error) || !contract || contract===model || !contract.startsWith(model) || !suffix || !usedSuffixPattern.test(suffix) || contract.length>10) p.push('Used contract suffix');
     }
@@ -565,8 +570,19 @@
         ${inputField(i,'AGENT1','RTO Agent (Firebird)',{small:'This is the RTO Pro agent for the selected Store.'})}
         ${inputField(i,'INVOICE1','Invoice #',{small:r._pdf_invoice?`Extracted: ${r._pdf_invoice}`:''})}
         ${inputField(i,'DUEDATE','Next due')}
-        ${inputField(i,'SACDATE','90-day SAC')}
+        ${inputField(i,'SACDATE','SAC date',{small:r._pdf_sac_source?`PDF: ${r._pdf_sac_source}`:''})}
+        ${inputField(i,'EMAILINV','Invoice by email',{small:clean(r._pdf_paperless_billing)?`Paperless Billing: ${r._pdf_paperless_billing} · 1 = checked in RTO Pro`:''})}
       </div>
+      ${clean(r._source_type).toLowerCase()==='pdf'?`<section class="pdf-payment-audit">
+        <div class="section-heading-row"><div><strong>PDF payment mapping</strong><span>Exact RentaBarn values used for the RTO import.</span></div><div class="pdf-total-pmt"><span>Total Monthly PMT (PDF)</span><strong>${esc(r._pdf_total_monthly_pmt || '—')}</strong></div></div>
+        <div class="mapping-grid payment-grid">
+          ${inputField(i,'RATE1','PMT before tax',{emphasis:true,small:r._pdf_pmt_before_tax?`PDF: ${r._pdf_pmt_before_tax} · mapped directly to RATE1`:''})}
+          ${inputField(i,'GRP','LDW',{small:r._pdf_ldw?`PDF: ${r._pdf_ldw}`:''})}
+          ${inputField(i,'EXTRARENT','Security deposit',{small:r._pdf_security_deposit?`PDF: ${r._pdf_security_deposit}`:''})}
+          ${inputField(i,'PAIDDOWN','Purchase reserve',{small:r._pdf_purchase_reserve?`PDF: ${r._pdf_purchase_reserve}`:''})}
+        </div>
+        <div class="pdf-payment-note">RTO Pro receives the item rental rate in RATE1, LDW separately in GRP, and calculates the taxed monthly total. PMT is intentionally 0.00 when inventory RATE1 is supplied.</div>
+      </section>`:''}
       ${textareaField(i,'DIRECTIONS','Directions / coordinates',{rows:4,wide:true})}
       <div class="pdf-note">The Invoice PDF is now always included in the download set because that is where ShedSuite commonly stores the <strong>Agent:</strong> field.</div>
     </div>`;

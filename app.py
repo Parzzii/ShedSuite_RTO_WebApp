@@ -109,7 +109,8 @@ DEFAULT_MODEL_SERIES = {
 
 # Used-building contract rules. RTO Pro does not allow a contract number to be
 # reused, while a used building must keep its original MODEL1.  V6.3.2 therefore
-# keeps MODEL1 untouched and assigns CONTRACT = MODEL1 + suffix.
+# keeps MODEL1 untouched. ShedSuite uses MODEL1 + suffix; PDF contracts use
+# Agreement # + suffix because Agreement # is their contract number.
 USED_CONTRACT_SUFFIXES = ['U'] + [chr(c) for c in range(ord('A'), ord('Z') + 1) if chr(c) != 'U']
 
 
@@ -203,6 +204,11 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
         model = str(row.get('MODEL1', '') or '').strip()
         order_id = str(row.get('_source_order_id', '') or '').strip()
         src = source_by_order.get(order_id, {})
+        source_type = str(src.get('_import_source_type', row.get('_source_type', 'csv')) or 'csv').lower()
+        # ShedSuite contracts intentionally use MODEL1 as their base number.
+        # RentaBarn PDF contracts use Agreement # as CONTRACT, so a used PDF
+        # building (if one needs a suffix) must suffix the agreement—not MODEL1.
+        base_contract = order_id if source_type == 'pdf' and order_id else model
         condition = str(src.get('Condition', '') or row.get('_source_condition', '') or '').strip()
         condition_low = condition.casefold()
         history = used_model_history(model, existing)
@@ -223,13 +229,13 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
         row['_used_detected'] = detected
         row['_used_building'] = detected
         row['_used_detection_reason'] = ' · '.join(reasons)
-        row['_used_base_contract'] = model
+        row['_used_base_contract'] = base_contract
         row['_used_contract_suffix'] = ''
         row['_used_suffix_manual'] = False
         row['_used_contract_error'] = ''
 
         if detected:
-            contract, suffix = next_used_contract(model, unavailable)
+            contract, suffix = next_used_contract(base_contract, unavailable)
             if contract:
                 row['CONTRACT'] = contract
                 row['_used_contract_suffix'] = suffix
@@ -1297,9 +1303,10 @@ def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> l
             continue
 
         model = str(row.get('MODEL1', '') or '').strip()
+        base_contract = str(row.get('_used_base_contract', '') or '').strip() or model
         current = str(row.get('CONTRACT', '') or '').strip()
         current_key = _contract_key(current)
-        model_key = _contract_key(model)
+        model_key = _contract_key(base_contract)
         suffix = current_key[len(model_key):] if model_key and current_key.startswith(model_key) else ''
         current_valid = (
             bool(current)
@@ -1315,7 +1322,7 @@ def ensure_used_contracts_available(jp: Path, rows: list[dict], refs: dict) -> l
             unavailable.add(current_key)
             continue
 
-        candidate, new_suffix = next_used_contract(model, unavailable)
+        candidate, new_suffix = next_used_contract(base_contract, unavailable)
         if not candidate:
             row['_used_contract_error'] = 'No available used-building suffix fits the 10-character RTO contract limit.'
             continue
@@ -2688,18 +2695,60 @@ def process():
         r['_source_csv_name'] = str(src_for_file.get('_import_csv_name', '') or '')
         r['_source_pdf_name'] = str(src_for_file.get('_import_pdf_name', '') or '')
         if source_type == 'pdf':
-            # PDF-only fields that do not have a ShedSuite transform equivalent.
+            # RentaBarn PDF fields are authoritative for these labeled values.
+            # Do not reuse ShedSuite-derived calculations when the PDF prints an
+            # explicit agreement/payment amount.
+            agreement = str(src_for_file.get('_pdf_agreement_number', '') or src_for_file.get('Customer Order Id', '') or '').strip()
+            if agreement:
+                r['CONTRACT'] = agreement
             if str(src_for_file.get('_pdf_salesperson_source', '') or '').strip():
                 r['SALESMAN'] = str(src_for_file.get('_pdf_salesperson_source', '') or '').strip()
             if str(src_for_file.get('_pdf_county_of_delivery', '') or '').strip() and not str(r.get('COUNTY', '') or '').strip():
                 r['COUNTY'] = str(src_for_file.get('_pdf_county_of_delivery', '') or '').strip().upper()
             if str(src_for_file.get('_pdf_contract_price', '') or '').strip():
                 r['CONTRACTAMT'] = str(src_for_file.get('_pdf_contract_price', '') or '').strip()
-            if str(src_for_file.get('_pdf_total_monthly_pmt', '') or '').strip():
-                r['PMT'] = str(src_for_file.get('_pdf_total_monthly_pmt', '') or '').strip()
+
+            # RTO Pro expects the individual inventory RATE when inventory is
+            # included and PMT should be 0.00.  RentaBarn's "PMT Before Tax"
+            # is already the rent-before-tax amount; LDW is a separate row and
+            # must NOT be subtracted from it a second time.
+            pdf_pmt_before_tax = str(src_for_file.get('_pdf_pmt_before_tax', '') or '').strip()
+            if pdf_pmt_before_tax:
+                r['RATE1'] = pdf_pmt_before_tax
+                r['PMT'] = '0.00'
+            pdf_ldw = str(src_for_file.get('_pdf_ldw', '') or '').strip()
+            if pdf_ldw:
+                r['GRP'] = pdf_ldw
+            pdf_security = str(src_for_file.get('_pdf_security_deposit', '') or '').strip()
+            if pdf_security:
+                r['EXTRARENT'] = pdf_security
+            pdf_reserve = str(src_for_file.get('_pdf_purchase_reserve', '') or '').strip()
+            if pdf_reserve:
+                r['PAIDDOWN'] = pdf_reserve
+
+            # 90 Days SAC is printed as e.g. YES (10/13/2026). Use that exact
+            # date rather than recomputing 90 days from another field.
+            pdf_sac = str(src_for_file.get('_pdf_sac_date', '') or '').strip()
+            if pdf_sac:
+                r['SACDATE'] = pdf_sac
+
+            # RTO Pro EMAILINV: 1 = invoice by email only, 0 = not email-only.
+            pdf_email_invoice = str(src_for_file.get('_pdf_email_invoice', '') or '').strip()
+            if pdf_email_invoice in {'0', '1'}:
+                r['EMAILINV'] = pdf_email_invoice
+
             if str(src_for_file.get('Date Created', '') or '').strip():
                 r['CONTRACTDATE'] = str(src_for_file.get('Date Created', '') or '').strip()
             r['CONDITION1'] = str(src_for_file.get('Condition', '') or '').strip().upper()
+
+            # Expose exact PDF values in the review UI for visual verification.
+            for meta_key in [
+                '_pdf_sac_date', '_pdf_sac_source', '_pdf_agreement_number',
+                '_pdf_pmt_before_tax', '_pdf_total_monthly_pmt', '_pdf_total_tax',
+                '_pdf_ldw', '_pdf_security_deposit', '_pdf_purchase_reserve',
+                '_pdf_paperless_billing', '_pdf_email_invoice',
+            ]:
+                r[meta_key] = str(src_for_file.get(meta_key, '') or '').strip()
     warnings.extend('Input: ' + x for x in input_warnings)
     if input_summary.get('file_count', 0) > 1:
         parts = []
