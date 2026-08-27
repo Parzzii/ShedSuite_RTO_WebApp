@@ -354,8 +354,14 @@ def apply_learned_corrections(rows: list[dict], ref: ReferenceData) -> list[str]
         if category_rule:
             target = str((category_rule.get('target', {}) or {}).get('category', '') or '').strip()
             if target:
-                row['CATEGORY1'] = canonical_category(target) or target
-                applied.append('Category')
+                learned_category = canonical_category(target) or target
+                current_category = str(row.get('CATEGORY1', '') or '').strip()
+                # Only show "Learned: Category" when memory actually changed
+                # the visible/imported value.  V7.19 could display the badge
+                # even though a later normalization changed the field back.
+                if learned_category.casefold() != current_category.casefold():
+                    row['CATEGORY1'] = learned_category
+                    applied.append('Category')
 
         brand_rule = _best_learning_rule(data, 'brand_vendor', _brand_learning_key(row), threshold=0.96)
         if brand_rule:
@@ -566,6 +572,60 @@ def used_model_history(model: str, existing_contracts) -> list[str]:
     return list(dict.fromkeys(matches))
 
 
+def _serial_history_candidates(serial: str, ref: ReferenceData) -> list[dict]:
+    """Return exact RTO Inventory rows for a physical building serial.
+
+    V7.19 uses Serial as the stable physical-building identity.  A repeat of the
+    same ShedSuite CSV may no longer contain the RTO model that was assigned on
+    the first import, so comparing only the newly suggested MODEL1 can miss a
+    previously rented building entirely.
+    """
+    serial_key = str(serial or '').strip().casefold()
+    if not serial_key:
+        return []
+    return [
+        item for item in (ref.existing_serials or [])
+        if str(item.get('serial', '') or '').strip().casefold() == serial_key
+    ]
+
+
+def _historical_model_for_serial(serial: str, ref: ReferenceData, existing_contracts) -> tuple[str, str, list[str]]:
+    """Find the RTO model already attached to this serial, if it has history.
+
+    Preference order:
+      1. A serial-matched inventory model that appears in CONTRACTS history.
+      2. A serial-matched inventory row whose status is clearly not STOCK.
+
+    Returns (model, status, matching_contracts).  STOCK-only rows are *not*
+    treated as used merely because the serial exists in inventory.
+    """
+    candidates = _serial_history_candidates(serial, ref)
+    if not candidates:
+        return '', '', []
+
+    # Strongest evidence: the serial's existing model already appears in rental
+    # contract history.  This catches an immediate re-run of the same CSV after
+    # the first RTO import even when the source CSV itself never knew model 501.
+    for item in candidates:
+        model = str(item.get('model', '') or '').strip()
+        if not model:
+            continue
+        history = used_model_history(model, existing_contracts)
+        if history:
+            return model, str(item.get('status', '') or '').strip(), history
+
+    # Secondary evidence for older/odd RTO data where CONTRACTS history is not
+    # exposed but Inventory clearly says the serial is no longer in STOCK.
+    stockish = {'', 'STOCK', 'AVAILABLE', 'IN STOCK'}
+    for item in candidates:
+        model = str(item.get('model', '') or '').strip()
+        status = str(item.get('status', '') or '').strip()
+        if model and status.upper() not in stockish:
+            return model, status, []
+
+    return '', '', []
+
+
 def next_used_contract(model: str, unavailable_contracts) -> tuple[str, str]:
     """Choose U first, then A/B/C... while respecting RTO's 10-char limit."""
     base = str(model or '').strip()
@@ -580,7 +640,14 @@ def next_used_contract(model: str, unavailable_contracts) -> tuple[str, str]:
 
 
 def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref: ReferenceData) -> None:
-    """Auto-detect prior-use buildings and reserve a unique suffixed contract."""
+    """Auto-detect prior-use buildings and reserve a unique suffixed contract.
+
+    V7.19 checks the physical SERIAL before allocating a new model.  This fixes
+    the repeat-import case where the first run was assigned model 501 but the
+    original ShedSuite CSV never contained 501.  On the second run, the exact
+    serial lets us recover model 501 from RTO Inventory/contract history, mark
+    the row Used, keep MODEL1=501, and allocate 501U/501A/... instead of 502.
+    """
     source_by_order = {
         str(x.get('Customer Order Id', '') or '').strip(): x
         for x in source_rows
@@ -593,30 +660,52 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
     unavailable = list(existing)
 
     for row in rows:
-        model = str(row.get('MODEL1', '') or '').strip()
         order_id = str(row.get('_source_order_id', '') or '').strip()
         src = source_by_order.get(order_id, {})
         source_type = str(src.get('_import_source_type', row.get('_source_type', 'csv')) or 'csv').lower()
-        # ShedSuite contracts intentionally use MODEL1 as their base number.
-        # RentaBarn PDF contracts use Agreement # as CONTRACT, so a used PDF
-        # building (if one needs a suffix) must suffix the agreement—not MODEL1.
-        base_contract = order_id if source_type == 'pdf' and order_id else model
+        serial = str(row.get('SERIAL1', '') or src.get('Serial Number', '') or '').strip()
+
+        model = str(row.get('MODEL1', '') or '').strip()
         condition = str(src.get('Condition', '') or row.get('_source_condition', '') or '').strip()
         condition_low = condition.casefold()
-        history = used_model_history(model, existing)
+
+        # Recover the model previously assigned to this exact physical serial
+        # BEFORE deciding whether this row should consume a new model number.
+        serial_model, serial_status, serial_contract_history = _historical_model_for_serial(
+            serial, ref, ref.existing_contracts
+        )
+        if serial_model:
+            model = serial_model
+            row['MODEL1'] = serial_model
+            # This must become the immutable physical model if the browser later
+            # recalculates the batch sequence or toggles Used off/on.
+            row['_original_model'] = serial_model
+
+        history = serial_contract_history or used_model_history(model, ref.existing_contracts)
 
         condition_detected = any(
             token in condition_low
             for token in ('used', 'pre-owned', 'preowned', 'repo', 'repossessed')
         )
-        detected = bool(history or condition_detected)
+        serial_detected = bool(serial_model)
+        detected = bool(history or condition_detected or serial_detected)
 
         reasons = []
+        if serial_detected:
+            detail = f'Exact serial {serial} already exists in RTO as model {serial_model}' if serial else f'Existing RTO model {serial_model}'
+            if serial_status:
+                detail += f' ({serial_status})'
+            reasons.append(detail)
         if history:
-            reasons.append('RTO Pro history: ' + ', '.join(history[:4]))
+            reasons.append('RTO Pro contract history: ' + ', '.join(history[:4]))
         if condition_detected:
             source_label = 'PDF condition' if str(src.get('_import_source_type', '') or '').lower() == 'pdf' else 'ShedSuite condition'
             reasons.append(source_label + ': ' + condition)
+
+        # ShedSuite contracts intentionally use MODEL1 as their base number.
+        # RentaBarn/Choice Capital PDF contracts keep Agreement # as CONTRACT,
+        # so a used PDF building suffixes the agreement rather than MODEL1.
+        base_contract = order_id if source_type == 'pdf' and order_id else model
 
         row['_used_detected'] = detected
         row['_used_building'] = detected
@@ -1533,13 +1622,13 @@ def normalize_inventory_rows(rows: list[dict]) -> list[dict]:
         row['invoice'] = row['invoice'][:15]
         row['brand'] = row['brand'].upper()[:15]
         row['vendor'] = row['vendor'].upper()[:15]
-        # V7.12: inventory can use only the approved category.xlsx column-D
-        # categories. Preserve an approved manual choice; otherwise infer it
-        # from Description (and any legacy category text) automatically.
+        # Inventory uses the same editable Category behavior as contracts:
+        # approved values get canonical spelling, but a manually typed value is
+        # preserved.  Smart matching is only the default when Category is blank.
         raw_category = row['category'] if row['category'].upper() not in {'', 'NONE'} else ''
         row['category'] = (
-            canonical_category(raw_category)
-            or smart_category(row['description'], raw_category)
+            (canonical_category(raw_category) or raw_category)
+            if raw_category else smart_category(row['description'])
         )[:31]
         row['agent'] = row['agent'][:30]
         row['store'] = row['store'][:10]
@@ -2819,15 +2908,20 @@ def save_job_rows(jp: Path, rows: list[dict]):
     for row in rows:
         _prepare_phone_and_customer_comment(row)
         row['DESCRIPTION1'] = normalize_color_words(row.get('DESCRIPTION1', ''))
-        # Enforce the same approved category list even after manual edits / the
-        # full-fields dialog. Invalid legacy text is smart-matched instead of
-        # being allowed into the RTO import CSV.
-        current_category = canonical_category(row.get('CATEGORY1', ''))
-        row['CATEGORY1'] = current_category or smart_category(
-            row.get('_source_model_variation', ''),
-            row.get('DESCRIPTION1', ''),
-            row.get('CATEGORY1', ''),
-        )
+        # Category remains a type-or-select field.  Preserve a non-empty manual
+        # or learned value exactly (apart from canonical casing for an approved
+        # category).  Only infer a category when the field is actually blank.
+        # This is required for correction learning: e.g. if the user teaches
+        # "Side Lofted Barn", a later save must not silently turn it back into
+        # the automatic "Lofted Barn" guess.
+        raw_category = str(row.get('CATEGORY1', '') or '').strip()
+        if raw_category:
+            row['CATEGORY1'] = canonical_category(raw_category) or raw_category
+        else:
+            row['CATEGORY1'] = smart_category(
+                row.get('_source_model_variation', ''),
+                row.get('DESCRIPTION1', ''),
+            )
     _ensure_row_uids(rows)
     # V7 serializes writes with the certificate worker so edits and background
     # PDF completion cannot overwrite one another.
