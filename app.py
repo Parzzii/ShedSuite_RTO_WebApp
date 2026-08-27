@@ -257,6 +257,83 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
                 unavailable.append(current)
 
 
+def _model_suggestion_parts(value: str):
+    """Return (prefix, number, width) for a model suggestion ending in digits."""
+    value = str(value or '').strip()
+    m = re.fullmatch(r'(.*?)(\d+)', value)
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)), len(m.group(2))
+
+
+def _advance_model_suggestion(value: str, offset: int) -> str:
+    parts = _model_suggestion_parts(value)
+    if not parts:
+        return str(value or '').strip()
+    prefix, number, width = parts
+    return prefix + str(number + max(0, int(offset or 0))).zfill(width)
+
+
+def apply_batch_model_suggestions(rows: list[dict]) -> None:
+    """Reserve sequential Next Model suggestions within the current batch.
+
+    V7.12 and earlier calculated the next model independently for each row, so
+    three Alpine contracts could all show the same `Next 33-1323` chip.  Keep a
+    stable base suggestion per model profile, then allocate that sequence in the
+    current review order. Used buildings keep their existing model and do not
+    consume a new number.
+    """
+    if not rows:
+        return
+
+    # Prefer the persisted base. For older/in-memory rows, recover the lowest
+    # numeric suggestion for each profile so repeated saves/reorders cannot make
+    # the base creep upward.
+    bases: dict[str, str] = {}
+    candidates: dict[str, list[str]] = {}
+    for row in rows:
+        profile = str(row.get('_profile', '') or '').strip()
+        if not profile:
+            continue
+        base = str(row.get('_next_model_base', '') or '').strip()
+        if base:
+            bases.setdefault(profile, base)
+        current = str(row.get('_next_model', '') or '').strip()
+        if current:
+            candidates.setdefault(profile, []).append(current)
+
+    for profile, vals in candidates.items():
+        if profile in bases:
+            continue
+        parsed = [(v, _model_suggestion_parts(v)) for v in vals]
+        parsed = [(v, p) for v, p in parsed if p]
+        if parsed:
+            # All values for a profile should share the same prefix. Numeric
+            # minimum is the original base if rows were already sequenced.
+            parsed.sort(key=lambda vp: (vp[1][1], vp[0]))
+            bases[profile] = parsed[0][0]
+        elif vals:
+            bases[profile] = vals[0]
+
+    offsets: dict[str, int] = {}
+    for row in rows:
+        profile = str(row.get('_profile', '') or '').strip()
+        base = bases.get(profile, '')
+        if profile and base:
+            row['_next_model_base'] = base
+
+        used = row.get('_used_building') is True or str(row.get('_used_building', '')).lower() in ('1', 'true', 'yes', 'on')
+        if used:
+            row['_next_model'] = ''
+            continue
+        if not profile or not base:
+            continue
+
+        offset = offsets.get(profile, 0)
+        row['_next_model'] = _advance_model_suggestion(base, offset)
+        offsets[profile] = offset + 1
+
+
 def add_contract_history_to_refs(refs: dict, existing_contracts) -> dict:
     """Expose only contract identifiers needed by the browser-side suffix picker."""
     refs = dict(refs or {})
@@ -2255,6 +2332,7 @@ def _ensure_row_uids(rows: list[dict]) -> bool:
 
 
 def save_job_rows(jp: Path, rows: list[dict]):
+    apply_batch_model_suggestions(rows)
     for row in rows:
         _prepare_phone_and_customer_comment(row)
         row['DESCRIPTION1'] = normalize_color_words(row.get('DESCRIPTION1', ''))

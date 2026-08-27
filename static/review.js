@@ -143,6 +143,54 @@
     return v === true || ['1','true','yes','on'].includes(clean(v).toLowerCase());
   }
 
+  function modelSuggestionParts(value) {
+    const m=clean(value).match(/^(.*?)(\d+)$/);
+    if (!m) return null;
+    return {prefix:m[1], number:Number(m[2]), width:m[2].length};
+  }
+
+  function advanceModelSuggestion(value, offset) {
+    const p=modelSuggestionParts(value);
+    if (!p || !Number.isFinite(p.number)) return clean(value);
+    return `${p.prefix}${String(p.number + Math.max(0, Number(offset)||0)).padStart(p.width,'0')}`;
+  }
+
+  function recomputeBatchModelSuggestions() {
+    const bases={};
+    const candidates={};
+    rows.forEach(r=>{
+      const profile=clean(r._profile);
+      if (!profile) return;
+      const persisted=clean(r._next_model_base);
+      if (persisted && !bases[profile]) bases[profile]=persisted;
+      const cur=clean(r._next_model);
+      if (cur) (candidates[profile] ||= []).push(cur);
+    });
+    Object.entries(candidates).forEach(([profile,vals])=>{
+      if (bases[profile]) return;
+      const parsed=vals.map(v=>[v,modelSuggestionParts(v)]).filter(([,p])=>p);
+      if (parsed.length) {
+        parsed.sort((a,b)=>a[1].number-b[1].number || a[0].localeCompare(b[0]));
+        bases[profile]=parsed[0][0];
+      } else if (vals.length) bases[profile]=vals[0];
+    });
+
+    const offsets={};
+    rows.forEach(r=>{
+      const profile=clean(r._profile);
+      const base=bases[profile] || '';
+      if (profile && base) r._next_model_base=base;
+      if (boolish(r._used_building)) {
+        r._next_model='';
+        return;
+      }
+      if (!profile || !base) return;
+      const offset=offsets[profile] || 0;
+      r._next_model=advanceModelSuggestion(base,offset);
+      offsets[profile]=offset+1;
+    });
+  }
+
   function usedBaseContract(r) {
     if (clean(r._source_type).toLowerCase()==='pdf') return clean(r._source_order_id || r._used_base_contract || r.CONTRACT);
     return clean(r.MODEL1 || r._used_base_contract);
@@ -733,6 +781,7 @@
   }
 
   function render() {
+    recomputeBatchModelSuggestions();
     const idxs=visibleIndexes();
     cards.innerHTML=idxs.length ? idxs.map(i=>buildCard(rows[i],i)).join('') : '<div class="empty-state">No contracts match the current filter.</div>';
     updateStats();

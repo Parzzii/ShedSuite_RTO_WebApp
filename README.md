@@ -1,3 +1,7 @@
+## V7.13 Sequential batch model suggestions
+
+The contract review now reserves Next Model suggestions across the current batch by model profile. If RTO Pro says the next model is 501, matching new contracts receive 501, 502, 503, etc. Used buildings do not consume a new number, and the sequence recomputes after reorder/discard/Used changes.
+
 ## V7.12.2 Large editable category picker
 
 Category keeps the V7.12.1 type-anything input, but uses a larger readable approved-category suggestion panel on focus/click. Typing filters the list live.
