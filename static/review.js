@@ -159,6 +159,8 @@
     const bases={};
     const candidates={};
     rows.forEach(r=>{
+      if (r._original_model===undefined) r._original_model=clean(r.MODEL1);
+      if (r._original_contract===undefined) r._original_contract=clean(r.CONTRACT);
       const profile=clean(r._profile);
       if (!profile) return;
       const persisted=clean(r._next_model_base);
@@ -175,21 +177,61 @@
       } else if (vals.length) bases[profile]=vals[0];
     });
 
+    const reserved=new Set();
+    rows.forEach(r=>{
+      if (boolish(r._model_manual) && clean(r.MODEL1)) reserved.add(clean(r.MODEL1).toUpperCase());
+      if (boolish(r._contract_manual) && clean(r.CONTRACT)) reserved.add(clean(r.CONTRACT).toUpperCase());
+    });
+
     const offsets={};
     rows.forEach(r=>{
       const profile=clean(r._profile);
       const base=bases[profile] || '';
       if (profile && base) r._next_model_base=base;
+      const sourceType=clean(r._source_type || 'csv').toLowerCase();
+
       if (boolish(r._used_building)) {
         r._next_model='';
+        if (sourceType!=='pdf' && !boolish(r._model_manual) && clean(r._original_model)) r.MODEL1=clean(r._original_model);
         return;
       }
-      if (!profile || !base) return;
-      const offset=offsets[profile] || 0;
-      r._next_model=advanceModelSuggestion(base,offset);
+      // PDF Model # / Agreement # are authoritative and are not replaced by
+      // ShedSuite's generated model sequence.
+      if (sourceType==='pdf' || !profile || !base) return;
+
+      let offset=offsets[profile] || 0;
+      let suggestion=advanceModelSuggestion(base,offset);
+      while (suggestion && reserved.has(suggestion.toUpperCase())) {
+        offset+=1;
+        suggestion=advanceModelSuggestion(base,offset);
+      }
+      r._next_model=suggestion;
       offsets[profile]=offset+1;
+
+      const oldAutoModel=clean(r._auto_model_value);
+      const currentModel=clean(r.MODEL1);
+      const originalModel=clean(r._original_model);
+      const canUpdateModel=!boolish(r._model_manual) && (!oldAutoModel || currentModel===oldAutoModel || currentModel===originalModel || !currentModel || currentModel==='Not Found');
+      if (canUpdateModel && suggestion) {
+        r.MODEL1=suggestion;
+        r._auto_model_value=suggestion;
+      }
+
+      const oldAutoContract=clean(r._auto_contract_value);
+      const currentContract=clean(r.CONTRACT);
+      const originalContract=clean(r._original_contract);
+      const modelNow=clean(r.MODEL1);
+      const canUpdateContract=!boolish(r._contract_manual) && (!oldAutoContract || currentContract===oldAutoContract || currentContract===originalContract || currentContract===originalModel || !currentContract || currentContract==='Not Found');
+      if (canUpdateContract && modelNow) {
+        r.CONTRACT=modelNow;
+        r._auto_contract_value=modelNow;
+      }
+
+      if (clean(r.MODEL1)) reserved.add(clean(r.MODEL1).toUpperCase());
+      if (clean(r.CONTRACT)) reserved.add(clean(r.CONTRACT).toUpperCase());
     });
   }
+
 
   function usedBaseContract(r) {
     if (clean(r._source_type).toLowerCase()==='pdf') return clean(r._source_order_id || r._used_base_contract || r.CONTRACT);
@@ -247,6 +289,13 @@
     r._used_base_contract=usedBaseContract(r);
     r._used_contract_error='';
     if (enabled) {
+      // A new-building row may already have an automatically reserved model.
+      // Used buildings must go back to the physical model from the source.
+      if (clean(r._source_type).toLowerCase()!=='pdf' && clean(r._original_model)) {
+        r.MODEL1=clean(r._original_model);
+        r._model_manual=false;
+        r._auto_model_value='';
+      }
       if (preserveManual) {
         const preferred=usedSuffixState(i,preferredSuffix);
         r._used_contract_suffix=preferred.suffix;
@@ -266,10 +315,19 @@
         r._used_contract_error=choice.error;
       }
     } else {
-      // Normal ShedSuite behavior follows MODEL1; PDF contracts use Agreement #.
-      r.CONTRACT=clean(r._source_type).toLowerCase()==='pdf' ? clean(r._source_order_id) : clean(r.MODEL1);
+      // Return ShedSuite rows to automatic batch numbering. PDF contracts keep
+      // their authoritative Agreement # / Model # values.
+      if (clean(r._source_type).toLowerCase()==='pdf') {
+        r.CONTRACT=clean(r._source_order_id);
+      } else {
+        r._model_manual=false;
+        r._contract_manual=false;
+        r._auto_model_value='';
+        r._auto_contract_value='';
+      }
       r._used_contract_suffix='';
       r._used_suffix_manual=false;
+      recomputeBatchModelSuggestions();
     }
   }
 
@@ -344,7 +402,7 @@
         <div class="field suggestion-field"><span>Account</span><input data-i="${i}" data-field="ACCOUNT" value="${esc(r.ACCOUNT)}" placeholder="existing/new account"><div class="suggestions">${Array.isArray(r._account_suggestions)?r._account_suggestions.map(a=>`<button type="button" class="chip suggestion" data-i="${i}" data-field="ACCOUNT" data-value="${esc(a)}">Existing ${esc(a)}</button>`).join(''):''}</div></div>
       </div>
       <div class="mapping-grid model-grid">
-        <div class="field suggestion-field"><span>Model #</span><input data-i="${i}" data-field="MODEL1" value="${esc(r.MODEL1)}"><div class="suggestions">${inventorySuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(inventorySuggestion)}">Inventory ${esc(inventorySuggestion)}</button>`:''}${stockSuggestion?`<button type="button" class="chip suggestion stock" data-i="${i}" data-field="MODEL1" data-value="${esc(stockSuggestion)}">Stock ${esc(stockSuggestion)}</button>`:''}${!used && nextSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(nextSuggestion)}">Next ${esc(nextSuggestion)}</button>`:''}</div>${used?'<small class="used-model-note">Used: keep the original building model number.</small>':''}</div>
+        <div class="field suggestion-field"><span>Model #</span><input data-i="${i}" data-field="MODEL1" value="${esc(r.MODEL1)}"><div class="suggestions">${inventorySuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="MODEL1" data-value="${esc(inventorySuggestion)}">Inventory ${esc(inventorySuggestion)}</button>`:''}${stockSuggestion?`<button type="button" class="chip suggestion stock" data-i="${i}" data-field="MODEL1" data-value="${esc(stockSuggestion)}">Stock ${esc(stockSuggestion)}</button>`:''}${!used && nextSuggestion?`<span class="chip auto-model-chip">Auto ${esc(nextSuggestion)}</span>`:''}</div>${used?'<small class="used-model-note">Used: keep the original building model number.</small>':''}</div>
         <div class="field suggestion-field"><span>Contract #</span><input data-i="${i}" data-field="CONTRACT" value="${esc(r.CONTRACT)}" ${used?'readonly aria-readonly="true"':''}><div class="suggestions">${!used?`<button type="button" class="chip copy-model" data-i="${i}">Copy Model #</button>`:''}${!used && contractSuggestion?`<button type="button" class="chip suggestion" data-i="${i}" data-field="CONTRACT" data-value="${esc(contractSuggestion)}">Order ${esc(contractSuggestion)}</button>`:''}${used?`<label class="used-suffix-picker"><span>Suffix</span><input class="used-suffix-input" data-i="${i}" value="${esc(r._used_contract_suffix)}" list="used-suffix-list-${i}" autocomplete="off" spellcheck="false" placeholder="Type suffix"><datalist id="used-suffix-list-${i}">${usedSuffixSuggestions(i)}</datalist>${boolish(r._used_suffix_manual)?'<small>Manual</small>':'<small>Auto suggested · type anything</small>'}</label>`:''}</div></div>
         <label class="field"><span>Zone</span><select class="zone-select" data-i="${i}">${zoneOptions(r)}</select><small>${esc(r._zone_selector || '')}</small></label>
         <div class="field readout-field"><span>Tax Zone</span><strong>${esc(r.TAXZONE || 'Needs selection')}</strong><small>Change it in Tax & Address</small></div>
@@ -973,6 +1031,21 @@
     }));
     document.querySelectorAll('input[data-field], textarea[data-field]').forEach(el=>el.addEventListener('input',e=>{
       const i=+e.target.dataset.i; const field=e.target.dataset.field; setField(i,field,e.target.value,false);
+      if (field==='MODEL1') {
+        rows[i]._model_manual=true;
+        rows[i]._auto_model_value='';
+        // For normal ShedSuite contracts, Contract follows a manually edited
+        // Model until the user explicitly edits Contract itself.
+        if (!boolish(rows[i]._used_building) && clean(rows[i]._source_type).toLowerCase()!=='pdf' && !boolish(rows[i]._contract_manual)) {
+          rows[i].CONTRACT=e.target.value;
+          rows[i]._auto_contract_value='';
+          const contractInput=document.querySelector(`input[data-i="${i}"][data-field="CONTRACT"]`);
+          if (contractInput) contractInput.value=e.target.value;
+        }
+      } else if (field==='CONTRACT') {
+        rows[i]._contract_manual=true;
+        rows[i]._auto_contract_value='';
+      }
       if (['CELL','REFPHONE1','REFPHONE2','REFERENCE1','REFRELATION1','REFERENCE2','REFRELATION2'].includes(field)) applyPhoneRule(i,false);
       if (['MODEL1','CONTRACT','DEALERID'].includes(field)) updateStats();
     }));
@@ -986,7 +1059,7 @@
       const i=+e.target.dataset.i; normalizePhoneField(i,e.target.dataset.field,false); render();
     }));
     document.querySelectorAll('.used-building-toggle').forEach(el=>el.addEventListener('change',e=>{
-      const i=+e.target.dataset.i; applyUsedBuilding(i,e.target.checked,true); render();
+      const i=+e.target.dataset.i; applyUsedBuilding(i,e.target.checked,true); recomputeBatchModelSuggestions(); render();
     }));
     document.querySelectorAll('.used-suffix-input').forEach(el=>{
       el.addEventListener('input',e=>{
@@ -1031,8 +1104,16 @@
       const i=+btn.dataset.i;
       putCoordinatesIntoDirections(i,clean(rows[i]._pdf_coordinates));
     }));
-    document.querySelectorAll('.suggestion').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; setField(i,btn.dataset.field,btn.dataset.value,false); if (btn.dataset.field==='MODEL1' && boolish(rows[i]._used_building)) applyUsedBuilding(i,true,false); render(); }));
-    document.querySelectorAll('.copy-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].CONTRACT=rows[i].MODEL1; render(); }));
+    document.querySelectorAll('.suggestion').forEach(btn=>btn.addEventListener('click',()=>{
+      const i=+btn.dataset.i; const field=btn.dataset.field; setField(i,field,btn.dataset.value,false);
+      if (field==='MODEL1') {
+        rows[i]._model_manual=true; rows[i]._auto_model_value='';
+        if (!boolish(rows[i]._used_building) && clean(rows[i]._source_type).toLowerCase()!=='pdf' && !boolish(rows[i]._contract_manual)) rows[i].CONTRACT=btn.dataset.value;
+        if (boolish(rows[i]._used_building)) applyUsedBuilding(i,true,false);
+      } else if (field==='CONTRACT') { rows[i]._contract_manual=true; rows[i]._auto_contract_value=''; }
+      render();
+    }));
+    document.querySelectorAll('.copy-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].CONTRACT=rows[i].MODEL1; rows[i]._contract_manual=true; rows[i]._auto_contract_value=''; render(); }));
     document.querySelectorAll('.all-btn').forEach(btn=>btn.addEventListener('click',()=>openAllFields(+btn.dataset.i)));
     document.querySelectorAll('.source-btn').forEach(btn=>btn.addEventListener('click',()=>openSource(+btn.dataset.i)));
     document.querySelectorAll('.discard-btn').forEach(btn=>btn.addEventListener('click',()=>discardContract(+btn.dataset.i,btn)));

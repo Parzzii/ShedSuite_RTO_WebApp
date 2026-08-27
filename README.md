@@ -1,3 +1,7 @@
+## V7.14 Automatic batch model + contract assignment
+
+V7.14 promotes the V7.13 sequential model suggestion into an automatic assignment for normal ShedSuite/CSV contracts. If the next model is 501, the batch is populated as 501 / 502 / 503 in review order, and Contract # follows Model # automatically. Both fields remain editable. Used buildings retain their original model and suffix workflow and do not consume a new number. PDF contracts keep their PDF Model # and Agreement #. Manual overrides are preserved across save/reorder operations.
+
 ## V7.13 Sequential batch model suggestions
 
 The contract review now reserves Next Model suggestions across the current batch by model profile. If RTO Pro says the next model is 501, matching new contracts receive 501, 502, 503, etc. Used buildings do not consume a new number, and the sequence recomputes after reorder/discard/Used changes.

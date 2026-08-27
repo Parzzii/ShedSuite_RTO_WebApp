@@ -274,17 +274,38 @@ def _advance_model_suggestion(value: str, offset: int) -> str:
     return prefix + str(number + max(0, int(offset or 0))).zfill(width)
 
 
-def apply_batch_model_suggestions(rows: list[dict]) -> None:
-    """Reserve sequential Next Model suggestions within the current batch.
+def _row_bool(value) -> bool:
+    return value is True or str(value or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
-    V7.12 and earlier calculated the next model independently for each row, so
-    three Alpine contracts could all show the same `Next 33-1323` chip.  Keep a
-    stable base suggestion per model profile, then allocate that sequence in the
-    current review order. Used buildings keep their existing model and do not
-    consume a new number.
+
+def apply_batch_model_suggestions(rows: list[dict]) -> None:
+    """Reserve sequential model numbers and auto-fill new ShedSuite rows.
+
+    V7.14 turns the V7.13 batch-aware suggestion into an actual assignment:
+    new ShedSuite/CSV rows receive the reserved MODEL1 and CONTRACT immediately.
+    The fields remain editable; once a user manually changes either field, that
+    field is no longer overwritten by later saves/reorders.
+
+    Used buildings keep the original physical model and do not consume a new
+    number. Imported contract PDFs keep their PDF Model # / Agreement # because
+    those values are authoritative for that source.
     """
     if not rows:
         return
+
+    # Preserve source values before any automatic assignment. These are needed
+    # if a normal row is later switched to Used Building.
+    for row in rows:
+        if '_original_model' not in row:
+            row['_original_model'] = str(row.get('MODEL1', '') or '').strip()
+        if '_original_contract' not in row:
+            row['_original_contract'] = str(row.get('CONTRACT', '') or '').strip()
+        # Persist explicit override flags from the first saved job so browser-side
+        # manual edits survive the save merge.
+        row.setdefault('_model_manual', False)
+        row.setdefault('_contract_manual', False)
+        row.setdefault('_auto_model_value', '')
+        row.setdefault('_auto_contract_value', '')
 
     # Prefer the persisted base. For older/in-memory rows, recover the lowest
     # numeric suggestion for each profile so repeated saves/reorders cannot make
@@ -308,12 +329,24 @@ def apply_batch_model_suggestions(rows: list[dict]) -> None:
         parsed = [(v, _model_suggestion_parts(v)) for v in vals]
         parsed = [(v, p) for v, p in parsed if p]
         if parsed:
-            # All values for a profile should share the same prefix. Numeric
-            # minimum is the original base if rows were already sequenced.
             parsed.sort(key=lambda vp: (vp[1][1], vp[0]))
             bases[profile] = parsed[0][0]
         elif vals:
             bases[profile] = vals[0]
+
+    # Respect manually-entered values when allocating automatic numbers. This
+    # prevents a later auto row from being assigned a value the user already
+    # typed elsewhere in the same batch.
+    reserved = set()
+    for row in rows:
+        if _row_bool(row.get('_model_manual')):
+            value = str(row.get('MODEL1', '') or '').strip().upper()
+            if value:
+                reserved.add(value)
+        if _row_bool(row.get('_contract_manual')):
+            value = str(row.get('CONTRACT', '') or '').strip().upper()
+            if value:
+                reserved.add(value)
 
     offsets: dict[str, int] = {}
     for row in rows:
@@ -322,16 +355,75 @@ def apply_batch_model_suggestions(rows: list[dict]) -> None:
         if profile and base:
             row['_next_model_base'] = base
 
-        used = row.get('_used_building') is True or str(row.get('_used_building', '')).lower() in ('1', 'true', 'yes', 'on')
+        used = _row_bool(row.get('_used_building'))
+        source_type = str(row.get('_source_type', 'csv') or 'csv').strip().lower()
+
         if used:
             row['_next_model'] = ''
+            # If this row had been auto-assigned while New and is now marked
+            # Used, restore the physical model from the source.
+            if source_type != 'pdf' and not _row_bool(row.get('_model_manual')):
+                original_model = str(row.get('_original_model', '') or '').strip()
+                if original_model:
+                    row['MODEL1'] = original_model
             continue
-        if not profile or not base:
+
+        # PDF contracts retain their printed Model # and Agreement #. They also
+        # do not consume a ShedSuite-generated model number.
+        if source_type == 'pdf' or not profile or not base:
             continue
 
         offset = offsets.get(profile, 0)
-        row['_next_model'] = _advance_model_suggestion(base, offset)
+        suggestion = _advance_model_suggestion(base, offset)
+        # Skip a manual value already reserved elsewhere in this batch.
+        while suggestion and suggestion.upper() in reserved:
+            offset += 1
+            suggestion = _advance_model_suggestion(base, offset)
+
+        row['_next_model'] = suggestion
         offsets[profile] = offset + 1
+
+        old_auto_model = str(row.get('_auto_model_value', '') or '').strip()
+        current_model = str(row.get('MODEL1', '') or '').strip()
+        original_model = str(row.get('_original_model', '') or '').strip()
+        model_manual = _row_bool(row.get('_model_manual'))
+        can_update_model = (
+            not model_manual
+            and (
+                not old_auto_model
+                or current_model == old_auto_model
+                or current_model == original_model
+                or current_model in ('', 'Not Found')
+            )
+        )
+        if can_update_model and suggestion:
+            row['MODEL1'] = suggestion
+            row['_auto_model_value'] = suggestion
+            current_model = suggestion
+
+        old_auto_contract = str(row.get('_auto_contract_value', '') or '').strip()
+        current_contract = str(row.get('CONTRACT', '') or '').strip()
+        original_contract = str(row.get('_original_contract', '') or '').strip()
+        contract_manual = _row_bool(row.get('_contract_manual'))
+        can_update_contract = (
+            not contract_manual
+            and (
+                not old_auto_contract
+                or current_contract == old_auto_contract
+                or current_contract == original_contract
+                or current_contract == original_model
+                or current_contract in ('', 'Not Found')
+            )
+        )
+        if can_update_contract and current_model:
+            row['CONTRACT'] = current_model
+            row['_auto_contract_value'] = current_model
+
+        # Reserve final automatic values before processing the next row.
+        if str(row.get('MODEL1', '') or '').strip():
+            reserved.add(str(row.get('MODEL1', '') or '').strip().upper())
+        if str(row.get('CONTRACT', '') or '').strip():
+            reserved.add(str(row.get('CONTRACT', '') or '').strip().upper())
 
 
 def add_contract_history_to_refs(refs: dict, existing_contracts) -> dict:
