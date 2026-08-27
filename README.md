@@ -1,3 +1,7 @@
+## V7.17 Email Quality Flag
+
+V7.17 flags missing or malformed customer email addresses directly in Contract Review. Blank emails show **Email missing**; partial/broken values such as `johnsmith` or `john@gmail` show **Email invalid**. These contracts are included in **Needs Review** and the email field is highlighted until corrected. The app never guesses or auto-completes an email address.
+
 ## V7.16 Learn From Your Corrections
 
 V7.16 adds conservative local correction learning to the Contracts review workflow. When you manually correct a repeatable mapping and click Save all edits, the app remembers the source-to-RTO mapping and can apply it automatically on future imports.

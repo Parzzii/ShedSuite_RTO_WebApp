@@ -3329,8 +3329,8 @@ def inventory_run_rto(job):
         return redirect(url_for('inventory_review', job=job))
 
     try:
-        command_parts = [str(exe), '-r', str(staging)]
-        command_line = f'"{exe}" -r "{staging}"'
+        command_parts = [str(exe), '-r', '-noopen', str(staging)]
+        command_line = f'"{exe}" -r -noopen "{staging}"'
         (jp / 'Run_RTO_Inventory_Import.cmd').write_text(
             '@echo off\r\n' + f'cd /d "{exe.parent}"\r\n' + command_line + '\r\n',
             encoding='cp1252',
@@ -4557,8 +4557,8 @@ def run_rto(job):
 
     try:
         # Exact V5.3 command shape. STORE is already a CSV field.
-        command_parts = [str(exe), '-importcust', str(staging)]
-        command_line = f'"{exe}" -importcust "{staging}"'
+        command_parts = [str(exe), '-importcust', '-noopen', str(staging)]
+        command_line = f'"{exe}" -importcust -noopen "{staging}"'
 
         (jp / 'Run_RTO_Import.cmd').write_text(
             '@echo off\r\n'

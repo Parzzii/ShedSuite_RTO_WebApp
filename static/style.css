@@ -272,3 +272,11 @@ html[data-theme="cyberpunk"] .category-combo-option{color:#fff8ff;border-bottom:
 html[data-theme="cyberpunk"] .category-combo-option:hover,html[data-theme="cyberpunk"] .category-combo-option:focus{background:linear-gradient(90deg,rgba(255,43,214,.18),rgba(21,233,255,.13));color:var(--neon-yellow);text-shadow:0 0 7px rgba(255,227,56,.32)}
 html[data-theme="cyberpunk"] .category-combo-empty{color:#c9b8d0}
 @media(max-width:600px){.category-combo-menu{width:100%;min-width:100%;max-width:100%;max-height:280px}}
+/* V7.18 email quality flag */
+.email-field input.email-invalid{border-color:#d92d20!important;background:#fff5f4!important;box-shadow:0 0 0 3px rgba(217,45,32,.08)}
+.email-field input.email-valid{border-color:#84c9a8}
+.email-status.bad{color:#b42318!important;font-weight:800!important}
+.email-status.good{color:#187052!important}
+html[data-theme="dark"] .email-field input.email-invalid{background:#301b1d!important;border-color:#ff756b!important;color:#fff}
+html[data-theme="cyberpunk"] .email-field input.email-invalid{background:rgba(90,9,29,.42)!important;border-color:#ff3b6b!important;box-shadow:0 0 12px rgba(255,59,107,.45)}
+html[data-theme="cyberpunk"] .email-status.bad{color:#ff6b83!important;text-shadow:0 0 8px rgba(255,59,107,.45)}

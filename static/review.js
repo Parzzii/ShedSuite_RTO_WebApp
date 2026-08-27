@@ -331,6 +331,16 @@
     }
   }
 
+  function emailIssue(value) {
+    const v=clean(value);
+    if (!v) return 'Email missing';
+    // Flag obvious partial/broken addresses such as "johnsmith",
+    // "john@gmail", "@gmail.com", or values containing spaces.
+    // Keep the rule intentionally practical: local@domain.tld.
+    const valid=/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(v);
+    return valid ? '' : 'Email invalid';
+  }
+
   function rowProblems(r) {
     const p=[];
     if (!clean(r.STORE)) p.push('Store');
@@ -339,6 +349,8 @@
     if (!clean(r.CONTRACT)) p.push('Contract #');
     if (!clean(r.ZONE)) p.push('Zone');
     if (!clean(r.TAXZONE)) p.push('Tax zone');
+    const emailProblem=emailIssue(r.EMAIL);
+    if (emailProblem) p.push(emailProblem);
     if (boolish(r._used_building)) {
       const model=usedBaseContract(r).toUpperCase(), contract=clean(r.CONTRACT).toUpperCase();
       const suffix=(model && contract.startsWith(model)) ? contract.slice(model.length) : '';
@@ -358,6 +370,11 @@
   function inputField(i, field, label, opts={}) {
     const r=rows[i]; const val=clean(r[field]);
     const type=opts.type || 'text';
+    if (field==='EMAIL') {
+      const issue=emailIssue(val);
+      const help=issue || 'Email format looks valid';
+      return `<label class="field email-field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input type="email" class="email-validation-input ${issue?'email-invalid':'email-valid'}" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="email" aria-invalid="${issue?'true':'false'}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}><small class="email-status ${issue?'bad':'good'}">${esc(help)}</small></label>`;
+    }
     if (field==='CATEGORY1' && approvedCategories.length) {
       return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><div class="category-combo"><input class="approved-category-input category-combo-input" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category" aria-autocomplete="list" aria-expanded="false"><div class="category-combo-menu" role="listbox" aria-label="Approved category suggestions"></div></div><small>Type normally, or click the field to open the full approved category list.</small></label>`;
     }
@@ -1049,8 +1066,22 @@
         rows[i]._auto_contract_value='';
       }
       if (['CELL','REFPHONE1','REFPHONE2','REFERENCE1','REFRELATION1','REFERENCE2','REFRELATION2'].includes(field)) applyPhoneRule(i,false);
+      if (field==='EMAIL') {
+        const issue=emailIssue(e.target.value);
+        e.target.classList.toggle('email-invalid',!!issue);
+        e.target.classList.toggle('email-valid',!issue);
+        e.target.setAttribute('aria-invalid',issue?'true':'false');
+        const helper=e.target.closest('.email-field')?.querySelector('.email-status');
+        if (helper) {
+          helper.textContent=issue || 'Email format looks valid';
+          helper.classList.toggle('bad',!!issue);
+          helper.classList.toggle('good',!issue);
+        }
+        updateStats();
+      }
       if (['MODEL1','CONTRACT','DEALERID'].includes(field)) updateStats();
     }));
+    document.querySelectorAll('input[data-field="EMAIL"]').forEach(el=>el.addEventListener('change',()=>render()));
     document.querySelectorAll('select.approved-category-select').forEach(el=>el.addEventListener('change',e=>{
       const i=+e.target.dataset.i; rows[i].CATEGORY1=e.target.value; updateStats();
     }));
