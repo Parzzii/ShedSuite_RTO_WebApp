@@ -1,3 +1,7 @@
+## V7.12.2 Large editable category picker
+
+Category keeps the V7.12.1 type-anything input, but uses a larger readable approved-category suggestion panel on focus/click. Typing filters the list live.
+
 ## V7.12.1 Editable category + approved suggestions
 
 - Category mapping is now restricted to the 28 unique non-empty categories from column D (D1:D170) of `category.xlsx`.

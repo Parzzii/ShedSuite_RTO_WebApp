@@ -253,7 +253,7 @@
     const r=rows[i]; const val=clean(r[field]);
     const type=opts.type || 'text';
     if (field==='CATEGORY1' && approvedCategories.length) {
-      return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input class="approved-category-input" list="approvedCategoryList" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category"><small>Type a category or choose one of the approved suggestions.</small></label>`;
+      return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><div class="category-combo"><input class="approved-category-input category-combo-input" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category" aria-autocomplete="list" aria-expanded="false"><div class="category-combo-menu" role="listbox" aria-label="Approved category suggestions"></div></div><small>Type normally, or click the field to open the full approved category list.</small></label>`;
     }
     return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input type="${type}" data-i="${i}" data-field="${field}" value="${esc(val)}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}>${opts.small?`<small>${esc(opts.small)}</small>`:''}</label>`;
   }
@@ -989,6 +989,70 @@
     document.querySelectorAll('.discard-btn').forEach(btn=>btn.addEventListener('click',()=>discardContract(+btn.dataset.i,btn)));
     document.querySelectorAll('.cert-retry').forEach(btn=>btn.addEventListener('click',()=>retryCertificate(btn.dataset.order,btn)));
     document.querySelectorAll('.cert-skip').forEach(btn=>btn.addEventListener('click',()=>skipCertificate(btn.dataset.order,btn)));
+    bindCategoryCombos(document);
+  }
+
+  function bindCategoryCombos(root=document) {
+    root.querySelectorAll('.category-combo').forEach(combo=>{
+      if (combo.dataset.bound==='1') return;
+      combo.dataset.bound='1';
+      const input=combo.querySelector('.category-combo-input');
+      const menu=combo.querySelector('.category-combo-menu');
+      if (!input || !menu) return;
+
+      const close=()=>{
+        combo.classList.remove('open');
+        input.setAttribute('aria-expanded','false');
+      };
+      const fill=()=>{
+        const q=norm(input.value);
+        const matches=approvedCategories.filter(c=>!q || norm(c).includes(q));
+        menu.innerHTML=matches.map(c=>`<button type="button" class="category-combo-option" role="option" data-value="${esc(c)}">${esc(c)}</button>`).join('') || '<div class="category-combo-empty">No approved match — you can keep typing your own category.</div>';
+      };
+      const open=()=>{
+        fill();
+        combo.classList.add('open');
+        input.setAttribute('aria-expanded','true');
+      };
+      const choose=btn=>{
+        input.value=btn.dataset.value || '';
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+        input.dispatchEvent(new Event('change',{bubbles:true}));
+        close();
+        input.focus();
+      };
+
+      input.addEventListener('focus',open);
+      input.addEventListener('click',open);
+      input.addEventListener('input',open);
+      input.addEventListener('keydown',e=>{
+        if(e.key==='Escape'){ close(); return; }
+        if(e.key==='ArrowDown'){
+          if(!combo.classList.contains('open')) open();
+          const first=menu.querySelector('.category-combo-option');
+          if(first){ e.preventDefault(); first.focus(); }
+        }
+      });
+      menu.addEventListener('mousedown',e=>e.preventDefault());
+      menu.addEventListener('click',e=>{
+        const btn=e.target.closest('.category-combo-option');
+        if(btn) choose(btn);
+      });
+      menu.addEventListener('keydown',e=>{
+        const current=e.target.closest('.category-combo-option');
+        if(!current) return;
+        const buttons=[...menu.querySelectorAll('.category-combo-option')];
+        const idx=buttons.indexOf(current);
+        if(e.key==='ArrowDown' && idx<buttons.length-1){ e.preventDefault(); buttons[idx+1].focus(); }
+        else if(e.key==='ArrowUp'){
+          e.preventDefault();
+          if(idx>0) buttons[idx-1].focus(); else input.focus();
+        } else if(e.key==='Escape'){ e.preventDefault(); close(); input.focus(); }
+      });
+      input.addEventListener('blur',()=>setTimeout(()=>{
+        if(!combo.contains(document.activeElement)) close();
+      },0));
+    });
   }
 
   function validate(show=true) {
@@ -1021,12 +1085,13 @@
       const val=clean(rows[i][h]); allFieldDraft[h]=val;
       const important=['ACCOUNT','CONTRACT','MODEL1','STORE','DEALERID','ZONE','TAXZONE','TAXRATE','CATEGORY1','DESCRIPTION1'].includes(h);
       if (h==='CATEGORY1' && approvedCategories.length) {
-        return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><input list="approvedCategoryList" data-all-field="${esc(h)}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category"></label>`;
+        return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><div class="category-combo"><input class="category-combo-input" data-all-field="${esc(h)}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category" aria-autocomplete="list" aria-expanded="false"><div class="category-combo-menu" role="listbox" aria-label="Approved category suggestions"></div></div></label>`;
       }
       return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><input data-all-field="${esc(h)}" value="${esc(val)}"></label>`;
     }).join('');
     allFieldsGrid.querySelectorAll('input').forEach(el=>el.addEventListener('input',()=>allFieldDraft[el.dataset.allField]=el.value));
     allFieldsGrid.querySelectorAll('select[data-all-field]').forEach(el=>el.addEventListener('change',()=>allFieldDraft[el.dataset.allField]=el.value));
+    bindCategoryCombos(allFieldsGrid);
     allFieldsDialog.showModal();
   }
   document.getElementById('applyAllFields').addEventListener('click',()=>{

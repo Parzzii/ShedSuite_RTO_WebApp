@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
-  <title>Inventory · ShedSuite → RTO Pro V7.12.1</title>
+  <title>Inventory · ShedSuite → RTO Pro V7.12.2</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -26,9 +26,9 @@
   <main class="shell wide inventory-shell">
     <header class="review-head inventory-head">
       <div>
-        <div class="eyebrow">V7.12.1 · INVENTORY ONLY</div>
+        <div class="eyebrow">V7.12.2 · INVENTORY ONLY</div>
         <h1>Add inventory</h1>
-        <p class="lede small">Choose the company/model series on each building. V7.12.1 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
+        <p class="lede small">Choose the company/model series on each building. V7.12.2 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
       </div>
       <button type="button" class="primary big inventory-add" id="addInventory">+ Add inventory</button>
     </header>
@@ -131,7 +131,7 @@
     }
     function categorySelect(i) {
       const current=clean(rows[i].category);
-      return `<label class="field"><span>Category</span><input class="inventory-category" list="inventoryApprovedCategoryList" data-i="${i}" data-field="category" value="${esc(current)}" autocomplete="off" placeholder="Type or choose category"><small>Type a category or choose one of the approved suggestions.</small></label>`;
+      return `<label class="field"><span>Category</span><div class="category-combo"><input class="inventory-category category-combo-input" data-i="${i}" data-field="category" value="${esc(current)}" autocomplete="off" placeholder="Type or choose category" aria-autocomplete="list" aria-expanded="false"><div class="category-combo-menu" role="listbox" aria-label="Approved category suggestions"></div></div><small>Type normally, or click the field to open the full approved category list.</small></label>`;
     }
     async function suggestCategory(i) {
       const r=rows[i];
@@ -222,6 +222,53 @@
       if(next && (!clean(r.model) || r._auto_model)) { r.model=next; r._auto_model=true; }
     }
 
+    function bindCategoryCombos(root=document) {
+      root.querySelectorAll('.category-combo').forEach(combo=>{
+        if(combo.dataset.bound==='1') return;
+        combo.dataset.bound='1';
+        const input=combo.querySelector('.category-combo-input');
+        const menu=combo.querySelector('.category-combo-menu');
+        if(!input||!menu) return;
+        const close=()=>{ combo.classList.remove('open'); input.setAttribute('aria-expanded','false'); };
+        const fill=()=>{
+          const q=clean(input.value).toLowerCase();
+          const matches=approvedCategories.filter(c=>!q || clean(c).toLowerCase().includes(q));
+          menu.innerHTML=matches.map(c=>`<button type="button" class="category-combo-option" role="option" data-value="${esc(c)}">${esc(c)}</button>`).join('') || '<div class="category-combo-empty">No approved match — you can keep typing your own category.</div>';
+        };
+        const open=()=>{ fill(); combo.classList.add('open'); input.setAttribute('aria-expanded','true'); };
+        const choose=btn=>{
+          input.value=btn.dataset.value||'';
+          input.dispatchEvent(new Event('input',{bubbles:true}));
+          input.dispatchEvent(new Event('change',{bubbles:true}));
+          close(); input.focus();
+        };
+        input.addEventListener('focus',open);
+        input.addEventListener('click',open);
+        input.addEventListener('input',open);
+        input.addEventListener('keydown',e=>{
+          if(e.key==='Escape'){ close(); return; }
+          if(e.key==='ArrowDown'){
+            if(!combo.classList.contains('open')) open();
+            const first=menu.querySelector('.category-combo-option');
+            if(first){ e.preventDefault(); first.focus(); }
+          }
+        });
+        menu.addEventListener('mousedown',e=>e.preventDefault());
+        menu.addEventListener('click',e=>{ const btn=e.target.closest('.category-combo-option'); if(btn) choose(btn); });
+        menu.addEventListener('keydown',e=>{
+          const current=e.target.closest('.category-combo-option');
+          if(!current) return;
+          const buttons=[...menu.querySelectorAll('.category-combo-option')];
+          const idx=buttons.indexOf(current);
+          if(e.key==='ArrowDown' && idx<buttons.length-1){ e.preventDefault(); buttons[idx+1].focus(); }
+          else if(e.key==='ArrowUp'){
+            e.preventDefault(); if(idx>0) buttons[idx-1].focus(); else input.focus();
+          } else if(e.key==='Escape'){ e.preventDefault(); close(); input.focus(); }
+        });
+        input.addEventListener('blur',()=>setTimeout(()=>{ if(!combo.contains(document.activeElement)) close(); },0));
+      });
+    }
+
     function bind() {
       document.querySelectorAll('[data-field]').forEach(el=>{
         const event=el.tagName==='SELECT'?'change':'input';
@@ -237,6 +284,7 @@
       document.querySelectorAll('.inventory-store').forEach(el=>el.addEventListener('change',e=>{ const i=+e.target.dataset.i; rows[i].store=e.target.value; rows[i].agent=agentForStore(e.target.value); render(); }));
       document.querySelectorAll('.use-next-model').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; rows[i].model=btn.dataset.value; rows[i]._auto_model=true; render(); }));
       document.querySelectorAll('.inventory-delete').forEach(btn=>btn.addEventListener('click',()=>{ const i=+btn.dataset.i; if(confirm('Discard this inventory item from the batch?')){ rows.splice(i,1); render(); renderValidation(false); } }));
+      bindCategoryCombos(document);
     }
 
     function renderValidation(show=true) {
