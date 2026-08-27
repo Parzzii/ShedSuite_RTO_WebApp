@@ -253,8 +253,7 @@
     const r=rows[i]; const val=clean(r[field]);
     const type=opts.type || 'text';
     if (field==='CATEGORY1' && approvedCategories.length) {
-      const options=approvedCategories.map(c=>`<option value="${esc(c)}" ${c===val?'selected':''}>${esc(c)}</option>`).join('');
-      return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><select class="approved-category-select" data-i="${i}" data-field="${field}">${options}</select><small>Approved RTO Pro categories only</small></label>`;
+      return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input class="approved-category-input" list="approvedCategoryList" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category"><small>Type a category or choose one of the approved suggestions.</small></label>`;
     }
     return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input type="${type}" data-i="${i}" data-field="${field}" value="${esc(val)}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}>${opts.small?`<small>${esc(opts.small)}</small>`:''}</label>`;
   }
@@ -1022,8 +1021,7 @@
       const val=clean(rows[i][h]); allFieldDraft[h]=val;
       const important=['ACCOUNT','CONTRACT','MODEL1','STORE','DEALERID','ZONE','TAXZONE','TAXRATE','CATEGORY1','DESCRIPTION1'].includes(h);
       if (h==='CATEGORY1' && approvedCategories.length) {
-        const options=approvedCategories.map(c=>`<option value="${esc(c)}" ${c===val?'selected':''}>${esc(c)}</option>`).join('');
-        return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><select data-all-field="${esc(h)}">${options}</select></label>`;
+        return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><input list="approvedCategoryList" data-all-field="${esc(h)}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category"></label>`;
       }
       return `<label class="field ${important?'important-field':''}"><span>${esc(h)}</span><input data-all-field="${esc(h)}" value="${esc(val)}"></label>`;
     }).join('');

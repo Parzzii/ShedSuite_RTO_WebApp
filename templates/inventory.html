@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
-  <title>Inventory · ShedSuite → RTO Pro V7.12</title>
+  <title>Inventory · ShedSuite → RTO Pro V7.12.1</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -26,9 +26,9 @@
   <main class="shell wide inventory-shell">
     <header class="review-head inventory-head">
       <div>
-        <div class="eyebrow">V7.12 · INVENTORY ONLY</div>
+        <div class="eyebrow">V7.12.1 · INVENTORY ONLY</div>
         <h1>Add inventory</h1>
-        <p class="lede small">Choose the company/model series on each building. V7.12 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
+        <p class="lede small">Choose the company/model series on each building. V7.12.1 uses the live RTO Pro Inventory table when connected, suggests the next model, and fills Brand, Vendor, Store and Agent defaults for you.</p>
       </div>
       <button type="button" class="primary big inventory-add" id="addInventory">+ Add inventory</button>
     </header>
@@ -47,6 +47,9 @@
 
     <div id="inventoryValidation" class="validation-banner hidden"></div>
     <div id="inventoryCards" class="inventory-card-list"></div>
+    <datalist id="inventoryApprovedCategoryList">
+      {% for category in approved_categories %}<option value="{{ category }}"></option>{% endfor %}
+    </datalist>
     <div id="inventoryEmpty" class="empty-state hidden">
       <h2>No inventory added yet</h2>
       <p>Click <strong>Add inventory</strong>, choose the company, then enter the serial and any other inventory details.</p>
@@ -128,8 +131,7 @@
     }
     function categorySelect(i) {
       const current=clean(rows[i].category);
-      const opts=approvedCategories.map(c=>`<option value="${esc(c)}" ${c===current?'selected':''}>${esc(c)}</option>`).join('');
-      return `<label class="field"><span>Category</span><select class="inventory-category" data-i="${i}" data-field="category"><option value="">— Auto from description —</option>${opts}</select><small>Only approved RTO Pro categories are available.</small></label>`;
+      return `<label class="field"><span>Category</span><input class="inventory-category" list="inventoryApprovedCategoryList" data-i="${i}" data-field="category" value="${esc(current)}" autocomplete="off" placeholder="Type or choose category"><small>Type a category or choose one of the approved suggestions.</small></label>`;
     }
     async function suggestCategory(i) {
       const r=rows[i];

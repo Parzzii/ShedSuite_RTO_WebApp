@@ -71,6 +71,10 @@
     <div id="validationBanner" class="validation-banner hidden"></div>
     <div id="cards" class="contract-list"></div>
 
+    <datalist id="approvedCategoryList">
+      {% for category in approved_categories %}<option value="{{ category }}"></option>{% endfor %}
+    </datalist>
+
     <form id="saveForm" method="post" action="{{ url_for('save', job=job) }}">
       <input type="hidden" name="rows_payload" id="rowsPayload">
     </form>

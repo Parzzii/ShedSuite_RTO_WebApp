@@ -1,4 +1,4 @@
-## V7.12 Approved category + color normalization
+## V7.12.1 Editable category + approved suggestions
 
 - Category mapping is now restricted to the 28 unique non-empty categories from column D (D1:D170) of `category.xlsx`.
 - Confirmed spreadsheet aliases are learned directly into the app, then semantic rules and conservative fuzzy matching handle messy Style / Description values.
