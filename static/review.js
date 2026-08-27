@@ -718,9 +718,11 @@
     const collapsed=collapsedRows.has(uid);
     const canSort=reorderingAllowed();
     const warningHtml=Array.isArray(r._warnings) && r._warnings.length ? `<details class="row-warnings"><summary>${r._warnings.length} original check${r._warnings.length===1?'':'s'}</summary>${r._warnings.map(x=>`<div>${esc(x)}</div>`).join('')}</details>` : '';
+    const learned=Array.isArray(r._learned_applied) ? r._learned_applied.filter(Boolean) : [];
+    const learnedHtml=learned.length ? `<span class="match good learned-match" title="This value came from a correction you saved on an earlier import">Learned: ${esc(learned.join(', '))}</span>` : '';
     const body = collapsed ? '' : `
       <div class="contract-body">
-        <div class="source-strip"><span class="source-label">${clean(r._source_type)==='pdf'?'PDF dealer':'ShedSuite dealer'}</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${warningHtml}</div>
+        <div class="source-strip"><span class="source-label">${clean(r._source_type)==='pdf'?'PDF dealer':'ShedSuite dealer'}</span><strong>${esc(r._source_dealer || '—')}</strong>${sourceMatchText(r)}${learnedHtml}${warningHtml}</div>
         <nav class="card-tabs" aria-label="Contract sections">
           ${[['mapping','Mapping'],['inventory','Inventory'],['customer','Customer'],['tax','Tax & Address'],['pdf','PDF / Agent']].map(([v,l])=>`<button type="button" class="card-tab ${tab===v?'active':''}" data-i="${i}" data-tab="${v}">${l}</button>`).join('')}
         </nav>

@@ -15,6 +15,7 @@ import uuid
 import xml.dom.minidom
 from pathlib import Path
 from datetime import datetime
+from difflib import SequenceMatcher
 from urllib.parse import unquote
 from xml.etree.ElementTree import Element, SubElement, tostring
 from zipfile import ZipFile, ZIP_DEFLATED
@@ -51,6 +52,8 @@ from category_rules import APPROVED_CATEGORIES, canonical_category, smart_catego
 
 
 BASE = Path(__file__).resolve().parent
+# Load .env before resolving the cross-version learning file path.
+load_dotenv(BASE / '.env')
 WORK = BASE / 'work' / 'jobs'
 WORK.mkdir(parents=True, exist_ok=True)
 
@@ -59,6 +62,394 @@ AUTH_DIR.mkdir(parents=True, exist_ok=True)
 
 SHEDSUITE_BASE_URL = 'https://app.shedsuite.com/rto/order/'
 MODEL_TRACKER_FILE = BASE / 'model_series.json'
+
+# V7.16 correction learning -------------------------------------------------
+# Learned mappings intentionally live outside the application/version folder so
+# they survive replacing V7.16 with a later ZIP. On Windows this becomes:
+#   %LOCALAPPDATA%\\ShedSuiteRTO\\learned_corrections.json
+# Set SHEDSUITE_LEARNING_FILE in .env to override the location.
+def _correction_learning_path() -> Path:
+    override = str(os.getenv('SHEDSUITE_LEARNING_FILE', '') or '').strip()
+    if override:
+        return Path(override).expanduser()
+    if os.name == 'nt':
+        root = Path(os.getenv('LOCALAPPDATA') or Path.home())
+        return root / 'ShedSuiteRTO' / 'learned_corrections.json'
+    return Path.home() / '.shedsuite_rto' / 'learned_corrections.json'
+
+
+CORRECTION_LEARNING_FILE = _correction_learning_path()
+CORRECTION_LEARNING_LOCK = threading.RLock()
+CORRECTION_LEARNING_KINDS = ('store', 'dealer', 'zone', 'category', 'brand_vendor')
+
+
+def _empty_correction_learning() -> dict:
+    return {
+        'version': 1,
+        'rules': {kind: [] for kind in CORRECTION_LEARNING_KINDS},
+        'updated_at': '',
+    }
+
+
+def _load_correction_learning() -> dict:
+    with CORRECTION_LEARNING_LOCK:
+        if not CORRECTION_LEARNING_FILE.exists():
+            return _empty_correction_learning()
+        try:
+            data = json.loads(CORRECTION_LEARNING_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            return _empty_correction_learning()
+        if not isinstance(data, dict):
+            return _empty_correction_learning()
+        rules = data.setdefault('rules', {})
+        for kind in CORRECTION_LEARNING_KINDS:
+            if not isinstance(rules.get(kind), list):
+                rules[kind] = []
+        return data
+
+
+def _save_correction_learning(data: dict) -> None:
+    with CORRECTION_LEARNING_LOCK:
+        CORRECTION_LEARNING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = dict(data or {})
+        data['version'] = 1
+        data['updated_at'] = datetime.now().isoformat(timespec='seconds')
+        temp = CORRECTION_LEARNING_FILE.with_suffix('.tmp')
+        temp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        temp.replace(CORRECTION_LEARNING_FILE)
+
+
+def _learning_text(value, *, entity: bool = False, category: bool = False) -> str:
+    text = str(value or '').casefold()
+    text = text.replace('&', ' and ')
+    if category:
+        # Categories should generalize across sizes. A correction for a 10x12
+        # Side Utility should also help an otherwise identical 12x16 building.
+        text = re.sub(r'\b\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\b', ' ', text, flags=re.I)
+        text = re.sub(r"\b\d+\s*(?:ft|feet|foot|')\b", ' ', text, flags=re.I)
+    words = re.findall(r'[a-z0-9]+', text)
+    if entity:
+        disposable = {
+            'llc', 'inc', 'incorporated', 'corp', 'corporation', 'company', 'co',
+            'limited', 'ltd', 'buildings', 'building', 'enterprises', 'enterprise',
+        }
+        words = [w for w in words if w not in disposable]
+    if category:
+        # These words rarely distinguish the actual RTO category and are often
+        # inconsistently present between vendor descriptions.
+        generic = {'shed', 'sheds', 'building', 'buildings', 'storage'}
+        words = [w for w in words if w not in generic]
+    return ' '.join(words).strip()
+
+
+def _learning_similarity(a: str, b: str) -> float:
+    a = str(a or '').strip()
+    b = str(b or '').strip()
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a in b or b in a:
+        shorter, longer = sorted((len(a), len(b)))
+        if shorter >= 5:
+            return max(0.93, shorter / max(1, longer))
+    ratio = SequenceMatcher(None, a, b).ratio()
+    at = set(a.split())
+    bt = set(b.split())
+    if at and bt:
+        jaccard = len(at & bt) / len(at | bt)
+        ratio = max(ratio, jaccard * 0.97)
+    return ratio
+
+
+def _row_learning_provider(row: dict) -> str:
+    return str(row.get('_pdf_provider', '') or row.get('_learning_provider', '') or '').strip()
+
+
+def _store_learning_key(row: dict) -> str:
+    provider = _learning_text(_row_learning_provider(row), entity=True)
+    company = _learning_text(row.get('_source_company', ''), entity=True)
+    dealer = _learning_text(row.get('_source_dealer', ''), entity=True)
+    # Scope PDF-provider learning by dealer/company when available. This keeps a
+    # single accidental correction from becoming a provider-wide Store rule.
+    parts = []
+    if provider:
+        parts.append(f'provider {provider}')
+    if dealer:
+        parts.append(f'dealer {dealer}')
+    elif company:
+        parts.append(f'company {company}')
+    return ' | '.join(parts)
+
+
+def _dealer_learning_key(row: dict) -> str:
+    return _learning_text(row.get('_source_dealer', ''), entity=True)
+
+
+def _category_learning_key(row: dict) -> str:
+    raw = str(row.get('_learning_category_source', '') or row.get('_source_model_variation', '') or '').strip()
+    return _learning_text(raw, category=True)
+
+
+def _brand_learning_key(row: dict) -> str:
+    return _learning_text(row.get('_source_company', ''), entity=True)
+
+
+def _upsert_learning_rule(data: dict, kind: str, source: str, target: dict, **context) -> bool:
+    source = str(source or '').strip()
+    if kind not in CORRECTION_LEARNING_KINDS or not source or not isinstance(target, dict):
+        return False
+    rules = data.setdefault('rules', {}).setdefault(kind, [])
+    signature = {
+        'source': source,
+        'store': str(context.get('store', '') or '').strip(),
+        'dealerid': str(context.get('dealerid', '') or '').strip(),
+    }
+    for rule in rules:
+        if (
+            str(rule.get('source', '') or '') == signature['source']
+            and str(rule.get('store', '') or '') == signature['store']
+            and str(rule.get('dealerid', '') or '') == signature['dealerid']
+        ):
+            rule['target'] = target
+            rule['source_raw'] = str(context.get('source_raw', '') or rule.get('source_raw', '') or '').strip()
+            rule['count'] = int(rule.get('count', 0) or 0) + 1
+            rule['updated_at'] = datetime.now().isoformat(timespec='seconds')
+            return True
+    rules.append({
+        **signature,
+        'source_raw': str(context.get('source_raw', '') or '').strip(),
+        'target': target,
+        'count': 1,
+        'updated_at': datetime.now().isoformat(timespec='seconds'),
+    })
+    # Bound each learned family so a years-old workstation cannot grow forever.
+    if len(rules) > 500:
+        rules[:] = sorted(rules, key=lambda x: str(x.get('updated_at', '')), reverse=True)[:500]
+    return True
+
+
+def _best_learning_rule(data: dict, kind: str, source: str, *, store: str = '', dealerid: str = '', threshold: float = 0.94):
+    source = str(source or '').strip()
+    if not source:
+        return None
+    candidates = []
+    for rule in data.get('rules', {}).get(kind, []):
+        if store and str(rule.get('store', '') or '').strip() not in {'', str(store).strip()}:
+            continue
+        if dealerid and str(rule.get('dealerid', '') or '').strip() not in {'', str(dealerid).strip()}:
+            continue
+        score = _learning_similarity(source, str(rule.get('source', '') or ''))
+        if score >= threshold:
+            # Repeated corrections are a small tie-breaker, not a way to make a
+            # weak fuzzy match win.
+            candidates.append((score, min(int(rule.get('count', 0) or 0), 20), rule))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x[0], x[1], str(x[2].get('updated_at', ''))), reverse=True)
+    return candidates[0][2]
+
+
+def _ref_value(item: dict, *names: str) -> str:
+    for name in names:
+        if name in item:
+            return str(item.get(name, '') or '').strip()
+        lower = name.lower()
+        if lower in item:
+            return str(item.get(lower, '') or '').strip()
+        upper = name.upper()
+        if upper in item:
+            return str(item.get(upper, '') or '').strip()
+    return ''
+
+
+def _store_title_from_ref(ref: ReferenceData, store: str) -> str:
+    for item in (ref.centralserver or KNOWN_STORES):
+        if _ref_value(item, 'store') == str(store or '').strip():
+            return _ref_value(item, 'storetitle', 'storename') or f'Store {store}'
+    return ''
+
+
+def _dealer_from_ref(ref: ReferenceData, dealerid: str):
+    for item in ref.dealers or []:
+        if _ref_value(item, 'id') == str(dealerid or '').strip():
+            return item
+    return None
+
+
+def _zone_from_ref(ref: ReferenceData, zone: str, store: str = ''):
+    for item in ref.zones or []:
+        if _ref_value(item, 'zone') != str(zone or '').strip():
+            continue
+        if store and _ref_value(item, 'store') not in {'', str(store).strip()}:
+            continue
+        return item
+    return None
+
+
+def _agent_for_store_ref(ref: ReferenceData, store: str) -> str:
+    for item in ref.agents or []:
+        if _ref_value(item, 'store') == str(store or '').strip():
+            return _ref_value(item, 'agent')
+    return ''
+
+
+def apply_learned_corrections(rows: list[dict], ref: ReferenceData) -> list[str]:
+    """Apply only high-confidence local corrections to freshly transformed rows."""
+    data = _load_correction_learning()
+    messages: list[str] = []
+    for row in rows:
+        applied: list[str] = []
+
+        store_rule = _best_learning_rule(data, 'store', _store_learning_key(row), threshold=0.96)
+        if store_rule:
+            target = store_rule.get('target', {}) or {}
+            store = str(target.get('store', '') or '').strip()
+            known_store_ids = {_ref_value(x, 'store') for x in (ref.centralserver or KNOWN_STORES)}
+            if store and (not ref.connected or not known_store_ids or store in known_store_ids):
+                row['STORE'] = store
+                row['_store_title'] = _store_title_from_ref(ref, store) or str(target.get('store_title', '') or '').strip()
+                agent = _agent_for_store_ref(ref, store)
+                if agent:
+                    row['AGENT1'] = agent
+                applied.append('Store')
+
+        dealer_rule = _best_learning_rule(
+            data, 'dealer', _dealer_learning_key(row), store=str(row.get('STORE', '') or ''), threshold=0.90
+        )
+        if dealer_rule:
+            target = dealer_rule.get('target', {}) or {}
+            dealerid = str(target.get('dealerid', '') or '').strip()
+            dealer_obj = _dealer_from_ref(ref, dealerid)
+            dealer_valid = bool(dealerid) and (
+                not ref.connected
+                or dealer_obj is not None
+            )
+            if dealer_valid and dealer_obj is not None and row.get('STORE'):
+                dealer_valid = _ref_value(dealer_obj, 'store') in {'', str(row.get('STORE', '') or '').strip()}
+            if dealer_valid:
+                row['DEALERID'] = dealerid
+                row['_dealer_name'] = (
+                    _ref_value(dealer_obj, 'companydealername') if dealer_obj else ''
+                ) or str(target.get('dealer_name', '') or '').strip()
+                applied.append('Dealer')
+
+        zone_rule = _best_learning_rule(
+            data,
+            'zone',
+            _dealer_learning_key(row),
+            store=str(row.get('STORE', '') or ''),
+            dealerid=str(row.get('DEALERID', '') or ''),
+            threshold=0.90,
+        )
+        if zone_rule:
+            target = zone_rule.get('target', {}) or {}
+            zone = str(target.get('zone', '') or '').strip()
+            zone_obj = _zone_from_ref(ref, zone, str(row.get('STORE', '') or ''))
+            if zone and (not ref.connected or zone_obj is not None):
+                row['ZONE'] = zone
+                applied.append('Zone')
+
+        category_rule = _best_learning_rule(data, 'category', _category_learning_key(row), threshold=0.90)
+        if category_rule:
+            target = str((category_rule.get('target', {}) or {}).get('category', '') or '').strip()
+            if target:
+                row['CATEGORY1'] = canonical_category(target) or target
+                applied.append('Category')
+
+        brand_rule = _best_learning_rule(data, 'brand_vendor', _brand_learning_key(row), threshold=0.96)
+        if brand_rule:
+            target = brand_rule.get('target', {}) or {}
+            brand = str(target.get('brand', '') or '').strip()
+            vendor = str(target.get('vendor', '') or '').strip()
+            if brand:
+                row['BRAND1'] = brand
+            if vendor:
+                row['VENDOR1'] = vendor
+            if brand or vendor:
+                applied.append('Brand/Vendor')
+
+        row['_learned_applied'] = applied
+        if applied:
+            # Remove stale row-level "unresolved" warnings once learning solved it.
+            existing = list(row.get('_warnings', []) or [])
+            if row.get('STORE'):
+                existing = [x for x in existing if str(x) != 'Store is unresolved']
+            if row.get('DEALERID'):
+                existing = [x for x in existing if str(x) != 'Dealer ID is unresolved']
+            if row.get('ZONE'):
+                existing = [x for x in existing if str(x) != 'Zone is unresolved']
+            row['_warnings'] = existing
+            messages.append(f"{row.get('NAME', 'Contract')}: learned correction applied ({', '.join(applied)})")
+    return messages
+
+
+def record_learned_corrections(pairs: list[tuple[dict, dict]]) -> int:
+    """Learn only when a human-submitted save changed a repeatable mapping."""
+    data = _load_correction_learning()
+    changed = 0
+    for old, new in pairs:
+        # Source metadata belongs to the original/previous row; the target comes
+        # from the user's newly saved value.
+        if str(new.get('STORE', '') or '').strip() and str(new.get('STORE', '') or '').strip() != str(old.get('STORE', '') or '').strip():
+            key = _store_learning_key(old)
+            if _upsert_learning_rule(
+                data, 'store', key,
+                {'store': str(new.get('STORE', '') or '').strip(), 'store_title': str(new.get('_store_title', '') or '').strip()},
+                source_raw=' / '.join(x for x in [_row_learning_provider(old), str(old.get('_source_company', '') or ''), str(old.get('_source_dealer', '') or '')] if x),
+            ):
+                changed += 1
+
+        if str(new.get('DEALERID', '') or '').strip() and str(new.get('DEALERID', '') or '').strip() != str(old.get('DEALERID', '') or '').strip():
+            key = _dealer_learning_key(old)
+            if _upsert_learning_rule(
+                data, 'dealer', key,
+                {'dealerid': str(new.get('DEALERID', '') or '').strip(), 'dealer_name': str(new.get('_dealer_name', '') or '').strip()},
+                store=str(new.get('STORE', '') or old.get('STORE', '') or '').strip(),
+                source_raw=str(old.get('_source_dealer', '') or '').strip(),
+            ):
+                changed += 1
+
+        if str(new.get('ZONE', '') or '').strip() and str(new.get('ZONE', '') or '').strip() != str(old.get('ZONE', '') or '').strip():
+            key = _dealer_learning_key(old)
+            if _upsert_learning_rule(
+                data, 'zone', key,
+                {'zone': str(new.get('ZONE', '') or '').strip()},
+                store=str(new.get('STORE', '') or old.get('STORE', '') or '').strip(),
+                dealerid=str(new.get('DEALERID', '') or old.get('DEALERID', '') or '').strip(),
+                source_raw=str(old.get('_source_dealer', '') or '').strip(),
+            ):
+                changed += 1
+
+        if str(new.get('CATEGORY1', '') or '').strip() and str(new.get('CATEGORY1', '') or '').strip() != str(old.get('CATEGORY1', '') or '').strip():
+            key = _category_learning_key(old)
+            if _upsert_learning_rule(
+                data, 'category', key,
+                {'category': str(new.get('CATEGORY1', '') or '').strip()},
+                source_raw=str(old.get('_learning_category_source', '') or old.get('_source_model_variation', '') or '').strip(),
+            ):
+                changed += 1
+
+        brand_changed = str(new.get('BRAND1', '') or '').strip() != str(old.get('BRAND1', '') or '').strip()
+        vendor_changed = str(new.get('VENDOR1', '') or '').strip() != str(old.get('VENDOR1', '') or '').strip()
+        if (brand_changed or vendor_changed) and (str(new.get('BRAND1', '') or '').strip() or str(new.get('VENDOR1', '') or '').strip()):
+            key = _brand_learning_key(old)
+            if _upsert_learning_rule(
+                data, 'brand_vendor', key,
+                {'brand': str(new.get('BRAND1', '') or '').strip(), 'vendor': str(new.get('VENDOR1', '') or '').strip()},
+                source_raw=str(old.get('_source_company', '') or '').strip(),
+            ):
+                changed += 1
+
+    if changed:
+        _save_correction_learning(data)
+    return changed
+
+
+def correction_learning_stats() -> dict:
+    data = _load_correction_learning()
+    counts = {kind: len(data.get('rules', {}).get(kind, [])) for kind in CORRECTION_LEARNING_KINDS}
+    return {'total': sum(counts.values()), 'counts': counts, 'path': str(CORRECTION_LEARNING_FILE)}
 
 # The web app keeps DB passwords in memory only for the life of this local
 # Python process. They are never written into the job folder.
@@ -3039,6 +3430,12 @@ def process():
         r['_source_file_name'] = source_name
         r['_source_csv_name'] = str(src_for_file.get('_import_csv_name', '') or '')
         r['_source_pdf_name'] = str(src_for_file.get('_import_pdf_name', '') or '')
+        r['_learning_provider'] = str(src_for_file.get('_pdf_provider', '') or '').strip()
+        r['_learning_category_source'] = ' | '.join(
+            str(src_for_file.get(k, '') or '').strip()
+            for k in ['Building Model Variation', 'Style', 'Unit Type', 'Description', 'Building Description']
+            if str(src_for_file.get(k, '') or '').strip()
+        )
         if source_type == 'pdf':
             # RentaBarn PDF fields are authoritative for these labeled values.
             # Do not reuse ShedSuite-derived calculations when the PDF prints an
@@ -3110,6 +3507,10 @@ def process():
                 '_pdf_paperless_billing', '_pdf_email_invoice', '_pdf_provider', '_pdf_tax_code',
             ]:
                 r[meta_key] = str(src_for_file.get(meta_key, '') or '').strip()
+    # V7.16: human corrections from prior jobs override the automatic mapper
+    # only when the source signature is an exact/very-high-confidence match.
+    warnings.extend('Learning: ' + x for x in apply_learned_corrections(rows, ref))
+
     warnings.extend('Input: ' + x for x in input_warnings)
     if input_summary.get('file_count', 0) > 1:
         parts = []
@@ -3400,6 +3801,7 @@ def review(job):
         sources=sources,
         input_summary=input_summary,
         approved_categories=APPROVED_CATEGORIES,
+        learning_stats=correction_learning_stats(),
     )
     return inject_review_panels(page_html, source_rows, rows, job, refs)
 
@@ -3469,6 +3871,7 @@ def save(job):
         row_pairs = list(zip(old_rows, incoming))
 
     rows = []
+    learning_pairs: list[tuple[dict, dict]] = []
 
     for old, new in row_pairs:
         r = {
@@ -3537,13 +3940,19 @@ def save(job):
                 r[k] = new[k]
 
         rows.append(r)
+        learning_pairs.append((old, r))
 
     source_rows = json.loads((jp / 'source_rows.json').read_text(encoding='utf-8')) if (jp / 'source_rows.json').exists() else []
+    learned_count = record_learned_corrections(learning_pairs)
     save_job_rows(jp, rows)
 
+    learning_note = (
+        f' Learned {learned_count} correction mapping' + ('s.' if learned_count != 1 else '.')
+        if learned_count else ''
+    )
     flash(
         'All row edits were saved. CSV, XML and ZIP were rebuilt '
-        'from the edited values.',
+        'from the edited values.' + learning_note,
         'ok',
     )
 
