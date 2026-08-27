@@ -526,7 +526,7 @@
   function certChip(r) {
     const item=certItemForRow(r);
     const state=clean(item?.status || (r._delivery_certificate==='Downloaded'?'ready':r._delivery_certificate==='Missing'?'missing':r._delivery_certificate==='Queued'?'queued':'not_requested')).toLowerCase();
-    const labels={queued:'CERT QUEUED',working:'CERT DOWNLOADING',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED',not_requested:''};
+    const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED',not_requested:''};
     const label=labels[state] || state.toUpperCase();
     return label ? `<span class="delivery-chip ${esc(state)}" data-cert-order="${esc(r._source_order_id)}">${esc(label)}</span>` : '';
   }
@@ -638,13 +638,13 @@
     document.getElementById('deliveryProgressBar').style.width=`${pct}%`;
     document.getElementById('deliveryProgressCount').textContent=`${done}/${total}`;
     document.getElementById('deliveryWorkerState').textContent=deliveryStatus.active?'Running in background':'Complete';
-    const working=Number(c.working||0), queued=Number(c.queued||0), ready=Number(c.ready||0), missing=Number(c.missing||0), skipped=Number(c.skipped||0);
-    document.getElementById('deliveryProgressText').textContent=deliveryStatus.active ? (working?'Chromium is downloading a certificate. You can keep editing.':'Chromium is running in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.');
-    document.getElementById('deliveryProgressStats').innerHTML=[ready?`<span>✓ ${ready} Ready</span>`:'',working?`<span>⏳ ${working} Downloading</span>`:'',queued?`<span>○ ${queued} Waiting</span>`:'',missing?`<span>⚠ ${missing} Missing</span>`:'',skipped?`<span>↷ ${skipped} Skipped</span>`:''].filter(Boolean).join('');
+    const working=Number(c.working||0), prefetched=Number(c.prefetched||0), queued=Number(c.queued||0), ready=Number(c.ready||0), missing=Number(c.missing||0), skipped=Number(c.skipped||0);
+    document.getElementById('deliveryProgressText').textContent=deliveryStatus.active ? (working?'Chromium is prefetching certificates. You can keep editing.':prefetched?'Certificates are prefetched and waiting for packet assembly.':'Chromium is running in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.');
+    document.getElementById('deliveryProgressStats').innerHTML=[ready?`<span>✓ ${ready} Ready</span>`:'',prefetched?`<span>⚡ ${prefetched} Prefetched</span>`:'',working?`<span>⏳ ${working} Prefetching</span>`:'',queued?`<span>○ ${queued} Waiting</span>`:'',missing?`<span>⚠ ${missing} Missing</span>`:'',skipped?`<span>↷ ${skipped} Skipped</span>`:''].filter(Boolean).join('');
 
     document.querySelectorAll('[data-cert-order]').forEach(el=>{
       const item=(deliveryStatus.items||{})[el.dataset.certOrder]; if(!item)return;
-      const state=clean(item.status).toLowerCase(); const labels={queued:'CERT QUEUED',working:'CERT DOWNLOADING',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED'};
+      const state=clean(item.status).toLowerCase(); const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED'};
       el.className=`delivery-chip ${state}`; el.textContent=labels[state] || state.toUpperCase();
     });
     // Update the richer PDF-tab status only when that tab is currently visible.

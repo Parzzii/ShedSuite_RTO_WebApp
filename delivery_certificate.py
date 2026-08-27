@@ -505,8 +505,45 @@ def _append_pdf(target: Path, cert_bytes: bytes) -> None:
         cert.close()
 
 
-async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: Path, progress=None, should_process=None, headless: bool = True) -> list[str]:
+async def _run(
+    rows: list[dict],
+    source_rows: list[dict],
+    pdf_dir: Path,
+    base: Path,
+    progress=None,
+    should_process=None,
+    headless: bool = True,
+    prefetch_cache_dir: Path | None = None,
+    packet_ready_flag: Path | None = None,
+    concurrency: int = 3,
+) -> list[str]:
+    """Download Delivery Certificates with session reuse and bounded concurrency.
+
+    V7.15 can start this before the direct ShedSuite packet PDFs are finished.
+    Certificates are fetched into a small local cache first; once the base-packet
+    marker appears they are appended to the combined PDFs.  This lets Chromium do
+    network/login work while the normal /process request is still assembling the
+    faster direct-link documents.
+
+    One authenticated context/page is reused per ShedSuite login.  A per-login
+    asyncio lock keeps that page serial, while different company logins can run
+    concurrently (default: 3 accounts at once).
+    """
     logins, legacy_book, _selected = _legacy_logins(base)
+    if prefetch_cache_dir:
+        prefetch_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    async def wait_for_packet_ready(timeout_seconds: float = 600.0) -> bool:
+        if packet_ready_flag is None:
+            return True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            if packet_ready_flag.exists():
+                return True
+            await asyncio.sleep(0.25)
+        return packet_ready_flag.exists()
+
     if not logins:
         msg = (
             'Delivery Certificate: V7 could not find Contract_Import.xlsm / Logininfo. '
@@ -520,19 +557,21 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
                 row['_delivery_certificate_method'] = ''
                 if progress:
                     progress(oid, 'missing', 'Logininfo credentials were not found.', row)
+        # In prefetch mode, do not let the app merge/rebuild while /process is
+        # still constructing the base packets.
+        await wait_for_packet_ready()
         return [msg]
 
     src_by_order = {str(x.get('Customer Order Id', '')).strip(): x for x in source_rows}
     login_map = {email.lower(): (email, password) for email, password in logins}
     warnings: list[str] = []
 
+    try:
+        concurrency = max(1, min(5, int(concurrency or 3)))
+    except Exception:
+        concurrency = 3
+
     async with async_playwright() as playwright:
-        # ShedSuite has historically been unreliable in true headless mode.
-        # On Windows V7.6.2 uses a normal headed Chromium window positioned far
-        # off-screen. Do NOT minimize it: Chromium aggressively throttles React/JS
-        # in minimized or occluded windows, which can leave ShedSuite's Files list
-        # empty and create a false Missing result. These flags keep the renderer
-        # active while the user continues working in the normal web-app window.
         launch_kwargs = {'headless': headless}
         if not headless:
             launch_kwargs['args'] = [
@@ -545,89 +584,169 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
             ]
         browser = await playwright.chromium.launch(**launch_kwargs)
         contexts: dict[str, tuple] = {}
-        try:
-            for row in rows:
-                oid = str(row.get('_source_order_id', '')).strip()
-                if not oid:
-                    continue
-                if should_process and not should_process(oid):
-                    # Status is already persisted by the discard/skip action.
-                    # Do not overwrite it here.
-                    continue
+        login_locks: dict[str, asyncio.Lock] = {}
+        semaphore = asyncio.Semaphore(concurrency)
+        pending_prefetch: dict[str, tuple[dict, Path, str, str]] = {}
+
+        def ordered_logins_for(row: dict) -> list[tuple[str, str]]:
+            oid = str(row.get('_source_order_id', '')).strip()
+            src = src_by_order.get(oid, {})
+            v3_login = str(row.get('_login') or '').strip()
+            ordered: list[tuple[str, str]] = []
+            if v3_login:
+                item = login_map.get(v3_login.lower())
+                if item:
+                    ordered.append(item)
+                return ordered
+
+            preferred = _preferred_login(src.get('Company Name', ''), src.get('Dealer', ''))
+            for email in preferred:
+                item = login_map.get(email.lower())
+                if item and item not in ordered:
+                    ordered.append(item)
+            if not ordered:
+                ordered.extend(logins)
+            return ordered
+
+        async def get_context(email: str, password: str):
+            key = email.lower()
+            if key not in contexts:
+                contexts[key] = await _login_context(browser, email, password, base, legacy_book)
+            return contexts[key]
+
+        async def append_prefetched(row: dict, cache_path: Path, method: str, cert_name: str) -> bool:
+            oid = str(row.get('_source_order_id', '')).strip()
+            if should_process and not should_process(oid):
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False
+            try:
+                cert_data = cache_path.read_bytes()
+                target = pdf_dir / f"{safe_filename(row.get('_pdf_name') or row.get('NAME') or oid)}.pdf"
+                _append_pdf(target, cert_data)
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                row['_delivery_certificate'] = 'Downloaded'
+                row['_delivery_certificate_method'] = method
+                row['_delivery_certificate_name'] = cert_name or 'Delivery Certificate'
                 if progress:
-                    progress(oid, 'working', 'Opening ShedSuite and locating Delivery Certificate…', row)
-                src = src_by_order.get(oid, {})
+                    progress(oid, 'ready', f'Downloaded via {method}.', row)
+                return True
+            except Exception as exc:
+                row['_delivery_certificate'] = 'Missing'
+                row['_delivery_certificate_method'] = ''
+                warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate append failed: {exc}")
+                if progress:
+                    progress(oid, 'missing', f'Certificate was prefetched but could not be appended: {exc}', row)
+                return False
 
-                # V6.3 keeps V3's company/login selection authoritative.  The
-                # transformed V3 row already contains the exact ShedSuite login
-                # selected by COMPANY_RULES as `_login`.  When it is present we
-                # use ONLY that account, so one company's order is never searched
-                # through unrelated company logins.
-                v3_login = str(row.get('_login') or '').strip()
-                ordered: list[tuple[str, str]] = []
-                if v3_login:
-                    item = login_map.get(v3_login.lower())
-                    if item:
-                        ordered.append(item)
-                    else:
-                        warnings.append(
-                            f"{row.get('NAME') or oid}: Delivery Certificate: "
-                            f"V3 selected ShedSuite login {v3_login}, but that login was not found in Logininfo."
-                        )
-                        row['_delivery_certificate'] = 'Missing'
-                        row['_delivery_certificate_method'] = ''
-                        if progress:
-                            progress(oid, 'missing', f'Login mapping not found for {v3_login}.', row)
-                        continue
-                else:
-                    # Unknown/manual companies do not have a V3 `_login`. In that
-                    # case use the narrow V5 preference map first; only if it has
-                    # no match do we fall back to the Logininfo list.
-                    preferred = _preferred_login(src.get('Company Name', ''), src.get('Dealer', ''))
-                    for email in preferred:
-                        item = login_map.get(email.lower())
-                        if item and item not in ordered:
-                            ordered.append(item)
-                    if not ordered:
-                        ordered.extend(logins)
+        async def process_row(row: dict) -> None:
+            oid = str(row.get('_source_order_id', '')).strip()
+            if not oid:
+                return
+            if should_process and not should_process(oid):
+                return
 
-                cert_data = None
-                method = ''
-                cert_name = ''
-                last_error = 'Delivery Certificate not found'
+            ordered = ordered_logins_for(row)
+            v3_login = str(row.get('_login') or '').strip()
+            if v3_login and not ordered:
+                warnings.append(
+                    f"{row.get('NAME') or oid}: Delivery Certificate: "
+                    f"V3 selected ShedSuite login {v3_login}, but that login was not found in Logininfo."
+                )
+                row['_delivery_certificate'] = 'Missing'
+                row['_delivery_certificate_method'] = ''
+                if progress:
+                    progress(oid, 'missing', f'Login mapping not found for {v3_login}.', row)
+                return
 
-                # Wrong-company logins simply fail the order lookup, so try the
-                # preferred Excel login first and then the remaining Logininfo rows.
+            if progress:
+                progress(oid, 'working', 'Prefetching Delivery Certificate from ShedSuite…', row)
+
+            cert_data = None
+            method = ''
+            cert_name = ''
+            last_error = 'Delivery Certificate not found'
+
+            # Different company logins can proceed at the same time. Rows that
+            # share one login intentionally serialize on the same authenticated page.
+            async with semaphore:
                 for email, password in ordered:
+                    if should_process and not should_process(oid):
+                        return
+                    key = email.lower()
+                    lock = login_locks.setdefault(key, asyncio.Lock())
                     try:
-                        if email.lower() not in contexts:
-                            contexts[email.lower()] = await _login_context(
-                                browser, email, password, base, legacy_book
-                            )
-                        context, page = contexts[email.lower()]
-                        cert_data, method, cert_name = await _capture_delivery_certificate(page, context, oid)
+                        async with lock:
+                            context, page = await get_context(email, password)
+                            cert_data, method, cert_name = await _capture_delivery_certificate(page, context, oid)
                         if cert_data:
                             break
                         last_error = method
                     except Exception as exc:
                         last_error = str(exc)
 
-                if cert_data:
-                    target = pdf_dir / f"{safe_filename(row.get('_pdf_name') or row.get('NAME') or oid)}.pdf"
-                    _append_pdf(target, cert_data)
-                    row['_delivery_certificate'] = 'Downloaded'
-                    row['_delivery_certificate_method'] = method
-                    row['_delivery_certificate_name'] = cert_name or 'Delivery Certificate'
-                    if progress:
-                        progress(oid, 'ready', f'Downloaded via {method}.', row)
-                else:
-                    row['_delivery_certificate'] = 'Missing'
-                    row['_delivery_certificate_method'] = ''
-                    warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate: {last_error}")
-                    if progress:
-                        progress(oid, 'missing', last_error, row)
+            if not cert_data:
+                row['_delivery_certificate'] = 'Missing'
+                row['_delivery_certificate_method'] = ''
+                warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate: {last_error}")
+                if progress:
+                    progress(oid, 'missing', last_error, row)
+                return
 
-            # Keep the fresh cookies for later runs, just as the Excel macro did.
+            if prefetch_cache_dir is None:
+                target = pdf_dir / f"{safe_filename(row.get('_pdf_name') or row.get('NAME') or oid)}.pdf"
+                _append_pdf(target, cert_data)
+                row['_delivery_certificate'] = 'Downloaded'
+                row['_delivery_certificate_method'] = method
+                row['_delivery_certificate_name'] = cert_name or 'Delivery Certificate'
+                if progress:
+                    progress(oid, 'ready', f'Downloaded via {method}.', row)
+                return
+
+            cache_path = prefetch_cache_dir / f'{safe_filename(oid)}.pdf'
+            temp = cache_path.with_suffix('.tmp')
+            temp.write_bytes(cert_data)
+            temp.replace(cache_path)
+            row['_delivery_certificate'] = 'Prefetched'
+            row['_delivery_certificate_method'] = method
+            row['_delivery_certificate_name'] = cert_name or 'Delivery Certificate'
+
+            # If the direct packet has already finished, append now. Otherwise
+            # keep fetching later contracts rather than blocking this login on a
+            # file-system wait; the second phase appends all cached certificates.
+            if packet_ready_flag is None or packet_ready_flag.exists():
+                await append_prefetched(row, cache_path, method, cert_name)
+            else:
+                pending_prefetch[oid] = (row, cache_path, method, cert_name)
+                if progress:
+                    progress(oid, 'prefetched', 'Certificate prefetched; waiting for the base contract packet…', row)
+
+        try:
+            tasks = [asyncio.create_task(process_row(row)) for row in rows]
+            if tasks:
+                await asyncio.gather(*tasks)
+
+            if pending_prefetch:
+                ready = await wait_for_packet_ready()
+                if not ready:
+                    for oid, (row, cache_path, _method, _cert_name) in list(pending_prefetch.items()):
+                        if should_process and not should_process(oid):
+                            continue
+                        row['_delivery_certificate'] = 'Missing'
+                        row['_delivery_certificate_method'] = ''
+                        msg = 'Delivery Certificate was prefetched, but the base packet never became ready.'
+                        warnings.append(f"{row.get('NAME') or oid}: {msg}")
+                        if progress:
+                            progress(oid, 'missing', msg, row)
+                else:
+                    for oid, (row, cache_path, method, cert_name) in list(pending_prefetch.items()):
+                        await append_prefetched(row, cache_path, method, cert_name)
+
             for email_key, (context, _page) in contexts.items():
                 try:
                     await context.storage_state(path=str(base / 'auth_state' / f'shedsuite_auth_{_safe_email(email_key)}.json'))
@@ -643,11 +762,22 @@ async def _run(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: P
 
     return warnings
 
-
-def append_delivery_certificates(rows: list[dict], source_rows: list[dict], pdf_dir: Path, base: Path, progress=None, should_process=None, headless: bool = True) -> list[str]:
-    """Synchronous wrapper used by the V7 background worker.
-
-    Chromium is headless by default so certificate downloads can continue while
-    the user edits contracts in the web app.
-    """
-    return asyncio.run(_run(rows, source_rows, pdf_dir, base, progress=progress, should_process=should_process, headless=headless))
+def append_delivery_certificates(
+    rows: list[dict],
+    source_rows: list[dict],
+    pdf_dir: Path,
+    base: Path,
+    progress=None,
+    should_process=None,
+    headless: bool = True,
+    prefetch_cache_dir: Path | None = None,
+    packet_ready_flag: Path | None = None,
+    concurrency: int = 3,
+) -> list[str]:
+    """Synchronous wrapper used by the V7 background worker."""
+    return asyncio.run(_run(
+        rows, source_rows, pdf_dir, base,
+        progress=progress, should_process=should_process, headless=headless,
+        prefetch_cache_dir=prefetch_cache_dir, packet_ready_flag=packet_ready_flag,
+        concurrency=concurrency,
+    ))

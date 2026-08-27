@@ -2487,7 +2487,7 @@ def _initialize_certificate_status(jp: Path, rows: list[dict], active: bool) -> 
         if is_pdf_source:
             detail = 'Uploaded contract PDF; no ShedSuite Delivery Certificate lookup needed.'
         elif should_queue:
-            detail = 'Waiting for background Chromium…'
+            detail = 'Queued for automatic Delivery Certificate prefetch…'
         else:
             detail = 'Delivery Certificate was not requested.'
         items[oid] = {
@@ -2604,13 +2604,14 @@ def _merge_certificate_results(job: str, worker_rows: list[dict], cert_warnings:
         save_job_rows(jp, current)
 
 
-def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) -> None:
+def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None, prefetch: bool = False) -> None:
     jp = job_path(job)
     try:
         with _job_lock(job):
-            if not (jp / 'rows.json').exists():
+            rows_path = jp / 'certificate_rows.json' if prefetch and (jp / 'certificate_rows.json').exists() else jp / 'rows.json'
+            if not rows_path.exists():
                 return
-            rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+            rows = json.loads(rows_path.read_text(encoding='utf-8'))
             source_rows = json.loads((jp / 'source_rows.json').read_text(encoding='utf-8')) if (jp / 'source_rows.json').exists() else []
             if only_order_ids:
                 rows = [r for r in rows if str(r.get('_source_order_id', '') or '').strip() in only_order_ids]
@@ -2636,7 +2637,7 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
                     status['items'][oid] = {
                         'status': 'queued',
                         'name': str(r.get('NAME', '') or oid),
-                        'detail': 'Waiting for background Chromium…',
+                        'detail': 'Queued for automatic Delivery Certificate prefetch…',
                     }
             _write_certificate_status(jp, status)
 
@@ -2713,10 +2714,26 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
         # ShedSuite has proven more reliable this way than in true headless mode,
         # and the Flask review page remains fully editable while it runs.
         browser_headless = os.name != 'nt'
+        try:
+            cert_concurrency = int(os.getenv('CERT_PREFETCH_CONCURRENCY', '3') or '3')
+        except Exception:
+            cert_concurrency = 3
+        cert_concurrency = max(1, min(5, cert_concurrency))
         warnings = append_delivery_certificates(
             rows, source_rows, jp / 'Combined_Files', BASE,
-            progress=progress, should_process=still_present, headless=browser_headless
+            progress=progress, should_process=still_present, headless=browser_headless,
+            prefetch_cache_dir=(jp / 'Delivery_Certificate_Cache') if prefetch else None,
+            packet_ready_flag=(jp / 'packet_setup_complete.flag') if prefetch else None,
+            concurrency=cert_concurrency,
         )
+        # A prefetch worker may finish authentication/error checks before the
+        # /process request has completed its initial packet build. Never merge
+        # or rebuild the package until that request explicitly marks it ready.
+        if prefetch:
+            deadline = time.time() + 600
+            flag = jp / 'packet_setup_complete.flag'
+            while time.time() < deadline and not flag.exists():
+                time.sleep(0.25)
         _merge_certificate_results(job, rows, warnings)
 
         with _job_lock(job):
@@ -2740,14 +2757,14 @@ def _run_certificate_worker(job: str, only_order_ids: set[str] | None = None) ->
             CERT_ACTIVE.discard(job)
 
 
-def _start_certificate_worker(job: str, only_order_ids: set[str] | None = None) -> bool:
+def _start_certificate_worker(job: str, only_order_ids: set[str] | None = None, prefetch: bool = False) -> bool:
     with CERT_ACTIVE_LOCK:
         if job in CERT_ACTIVE:
             return False
         CERT_ACTIVE.add(job)
     thread = threading.Thread(
         target=_run_certificate_worker,
-        args=(job, only_order_ids),
+        args=(job, only_order_ids, prefetch),
         daemon=True,
         name=f'delivery-cert-{job}',
     )
@@ -3186,6 +3203,46 @@ def process():
     pdf_mode = request.form.get('pdf_mode', 'contract')
     delivery_order_ids: set[str] = set()
 
+    # V7.15 automatic Delivery Certificate prefetch. Queue the ShedSuite rows
+    # immediately, before the fast direct-link packet assembly below. Chromium
+    # can therefore authenticate/search/download at the same time that /process
+    # is downloading the contract/invoice PDFs. It caches certificate bytes and
+    # waits for packet_setup_complete.flag before appending anything.
+    for r in rows:
+        order_id = str(r.get('_source_order_id', '') or '').strip()
+        source_type = str(r.get('_source_type', 'csv') or 'csv').lower()
+        if source_type == 'pdf':
+            r['_delivery_certificate'] = 'Not requested'
+            r['_delivery_certificate_method'] = 'Imported PDF source'
+            r['_delivery_certificate_name'] = ''
+        elif download_requested and order_id:
+            r['_delivery_certificate'] = 'Queued'
+            r['_delivery_certificate_method'] = ''
+            r['_delivery_certificate_name'] = ''
+            delivery_order_ids.add(order_id)
+        else:
+            r['_delivery_certificate'] = 'Not requested'
+            r['_delivery_certificate_method'] = ''
+            r['_delivery_certificate_name'] = ''
+
+    prefetch_started = False
+    packet_ready_flag = jp / 'packet_setup_complete.flag'
+    try:
+        packet_ready_flag.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if download_requested and delivery_order_ids:
+        # A separate immutable snapshot prevents the upload route's own field
+        # enrichment from racing with the browser worker. rows.json is also
+        # seeded so discard/skip checks have a current list of contracts.
+        (jp / 'certificate_rows.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
+        with _job_lock(job):
+            (jp / 'rows.json').write_text(json.dumps(rows, indent=2), encoding='utf-8')
+        _initialize_certificate_status(jp, rows, active=True)
+        prefetch_started = _start_certificate_worker(job, prefetch=True)
+    else:
+        _initialize_certificate_status(jp, rows, active=False)
+
     for r in rows:
         order_id = str(r.get('_source_order_id', '')).strip()
         srcrow = by_order.get(order_id, {})
@@ -3208,7 +3265,8 @@ def process():
             r['_delivery_certificate_name'] = ''
         else:
             # V6/V7 fast direct-link packet for ShedSuite. This part only runs
-            # when the user leaves Download PDFs enabled.
+            # when the user leaves Download PDFs enabled. V7.15 may already be
+            # prefetching the Delivery Certificate in Chromium at this point.
             if download_requested:
                 ordered_documents = build_ordered_document_list(srcrow, [])
                 if pdf_mode != 'all':
@@ -3223,14 +3281,6 @@ def process():
                     pdf_errors.extend([f'{r["NAME"]}: {x}' for x in errs])
                 r['_pdf_manifest'] = [name for name, _url in ordered_documents]
                 r['_pdf_available'] = target.exists()
-                r['_delivery_certificate'] = 'Queued'
-                r['_delivery_certificate_method'] = ''
-                r['_delivery_certificate_name'] = ''
-                delivery_order_ids.add(order_id)
-            else:
-                r['_delivery_certificate'] = 'Not requested'
-                r['_delivery_certificate_method'] = ''
-                r['_delivery_certificate_name'] = ''
 
         # Extract any immediately available PDF fields. For ShedSuite rows the
         # Delivery Certificate worker may enrich these again later (coordinates).
@@ -3286,13 +3336,16 @@ def process():
 
     save_job_rows(jp, rows)
 
+    # The initial packet is now safe for the prefetch worker to append into.
+    # Atomic-ish touch after save_job_rows guarantees the browser never races
+    # against download_and_combine overwriting the same Combined_Files PDF.
     if download_requested and delivery_order_ids:
-        _initialize_certificate_status(jp, rows, active=True)
-        # Let the worker select all queued ShedSuite/CSV rows from the saved job.
-        # Retry requests still pass a specific order id.
-        _start_certificate_worker(job)
-    else:
-        _initialize_certificate_status(jp, rows, active=False)
+        packet_ready_flag.write_text(datetime.now().isoformat(timespec='seconds'), encoding='utf-8')
+        if not prefetch_started:
+            # Extremely defensive fallback: if the early thread could not start,
+            # use the normal post-build worker so certificate functionality is
+            # never lost.
+            _start_certificate_worker(job)
 
     return redirect(
         url_for(
@@ -3643,13 +3696,13 @@ def api_delivery_status(job):
     with _job_lock(job):
         status = _read_certificate_status(jp)
     items = status.get('items', {}) if isinstance(status.get('items', {}), dict) else {}
-    counts = {'queued': 0, 'working': 0, 'ready': 0, 'missing': 0, 'skipped': 0, 'discarded': 0, 'not_requested': 0}
+    counts = {'queued': 0, 'working': 0, 'prefetched': 0, 'ready': 0, 'missing': 0, 'skipped': 0, 'discarded': 0, 'not_requested': 0}
     for item in items.values():
         key = str((item or {}).get('status', '')).lower()
         if key in counts:
             counts[key] += 1
     status['counts'] = counts
-    status['total'] = counts['queued'] + counts['working'] + counts['ready'] + counts['missing'] + counts['skipped']
+    status['total'] = counts['queued'] + counts['working'] + counts['prefetched'] + counts['ready'] + counts['missing'] + counts['skipped']
     status['done'] = counts['ready'] + counts['missing'] + counts['skipped']
     return jsonify(status)
 
