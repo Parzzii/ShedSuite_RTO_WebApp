@@ -712,6 +712,7 @@
           ${inputField(i,'GRP','LDW',{small:r._pdf_ldw?`PDF: ${r._pdf_ldw}`:''})}
           ${inputField(i,'EXTRARENT','Security deposit',{small:r._pdf_security_deposit?`PDF: ${r._pdf_security_deposit}`:''})}
           ${inputField(i,'PAIDDOWN','Purchase reserve',{small:r._pdf_purchase_reserve?`PDF: ${r._pdf_purchase_reserve}`:''})}
+          ${inputField(i,'PAYOFFDISCOUNT','EPO / payoff discount',{small:r._pdf_epo_percentage?`PDF rule: ${r._pdf_provider || 'Provider'} · ${r.PAYMENTS || '?'} months → EPO ${r._pdf_epo_percentage}%`: 'No configured PDF EPO rule'})}
         </div>
         <div class="pdf-payment-note">RTO Pro receives the item rental rate in RATE1, LDW separately in GRP, and calculates the taxed monthly total. PMT is intentionally 0.00 when inventory RATE1 is supplied.</div>
       </section>`:''}

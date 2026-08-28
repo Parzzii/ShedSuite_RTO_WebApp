@@ -47,7 +47,7 @@ from rto_transform import (
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
 from delivery_certificate import append_delivery_certificates
-from pdf_contract_import import parse_contract_pdf
+from pdf_contract_import import parse_contract_pdf, pdf_epo_percentage
 from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
 
 
@@ -62,6 +62,30 @@ AUTH_DIR.mkdir(parents=True, exist_ok=True)
 
 SHEDSUITE_BASE_URL = 'https://app.shedsuite.com/rto/order/'
 MODEL_TRACKER_FILE = BASE / 'model_series.json'
+
+
+def _apply_pdf_epo_to_row(row: dict) -> None:
+    """Apply provider/term PDF EPO using the same ShedSuite payoff mapping.
+
+    ShedSuite's transform converts Early Purchase Percentage P to RTO Pro's
+    PAYOFFDISCOUNT as (1 - P/100).  PDF rows use that exact convention.
+    Unsupported provider/term combinations are left blank rather than guessed.
+    """
+    if str(row.get('_source_type', '') or '').strip().casefold() != 'pdf':
+        return
+    provider = str(row.get('_pdf_provider', '') or row.get('_learning_provider', '') or '').strip()
+    term = str(row.get('PAYMENTS', '') or '').strip()
+    epo = pdf_epo_percentage(provider, term)
+    row['_pdf_epo_percentage'] = epo
+    if not epo:
+        row['PAYOFFDISCOUNT'] = ''
+        return
+    try:
+        discount = 1.0 - (float(epo) / 100.0)
+        row['PAYOFFDISCOUNT'] = f'{discount:.6f}'.rstrip('0').rstrip('.')
+    except Exception:
+        row['PAYOFFDISCOUNT'] = ''
+
 
 # V7.16 correction learning -------------------------------------------------
 # Learned mappings intentionally live outside the application/version folder so
@@ -3599,8 +3623,11 @@ def process():
                 '_pdf_pmt_before_tax', '_pdf_total_monthly_pmt', '_pdf_total_tax',
                 '_pdf_ldw', '_pdf_security_deposit', '_pdf_purchase_reserve',
                 '_pdf_paperless_billing', '_pdf_email_invoice', '_pdf_provider', '_pdf_tax_code',
+                '_pdf_epo_percentage', '_pdf_epo_term_months',
             ]:
                 r[meta_key] = str(src_for_file.get(meta_key, '') or '').strip()
+            # Re-assert the provider/term EPO mapping after all PDF overrides.
+            _apply_pdf_epo_to_row(r)
     # V7.16: human corrections from prior jobs override the automatic mapper
     # only when the source signature is an exact/very-high-confidence match.
     warnings.extend('Learning: ' + x for x in apply_learned_corrections(rows, ref))
@@ -4015,6 +4042,9 @@ def save(job):
         if '_secondary_phone' in r:
             r['_secondary_phone'] = phone(r.get('_secondary_phone', ''))
         _prepare_phone_and_customer_comment(r)
+        # V7.20: if a PDF term was corrected during review, recalculate EPO from
+        # the current provider + PAYMENTS before rebuilding the import files.
+        _apply_pdf_epo_to_row(r)
 
         # Save UI helper metadata as well.
         for k in [

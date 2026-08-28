@@ -31,6 +31,52 @@ SECTION_NAMES = {
 }
 
 
+# V7.20 PDF EPO schedules.  These are the provider/term percentages supplied by
+# the business and intentionally feed the exact same ShedSuite source field
+# (Early Purchase Percentage) used by rto_transform.py.  The existing transform
+# remains authoritative for converting the percentage to RTO Pro PAYOFFDISCOUNT.
+PDF_EPO_SCHEDULES = {
+    'DBM': {24: 65, 36: 60, 48: 55, 60: 45},
+    'CHOICE CAPITAL': {24: 65, 36: 60, 48: 55, 60: 45},
+    'RENTABARN': {24: 70, 36: 60, 48: 50, 60: 45},
+    'X-GEN': {24: 70, 36: 60, 48: 55, 54: 55, 60: 50, 72: 45},
+}
+
+
+def _canonical_epo_provider(value: str) -> str:
+    raw = re.sub(r'\s+', ' ', str(value or '')).strip().casefold()
+    compact = re.sub(r'[^a-z0-9]+', '', raw)
+    if 'choicecapital' in compact:
+        return 'CHOICE CAPITAL'
+    if 'rentabarn' in compact or 'wolfvalley' in compact or compact == 'wvb' or compact.startswith('wvb'):
+        return 'RENTABARN'
+    if compact == 'dbm' or compact.startswith('dbm'):
+        return 'DBM'
+    if 'xgen' in compact:
+        return 'X-GEN'
+    return str(value or '').strip().upper()
+
+
+def _term_months(value: str) -> int | None:
+    m = re.search(r'\b(\d{1,3})\b', str(value or ''))
+    return int(m.group(1)) if m else None
+
+
+def pdf_epo_percentage(provider: str, term: str) -> str:
+    """Return the configured PDF EPO percentage for provider + term.
+
+    Empty string means the combination is not configured and must not be
+    guessed.  Keeping this as a public helper also lets app.py recalculate the
+    value if the user manually changes the RTO term during review.
+    """
+    canonical = _canonical_epo_provider(provider)
+    months = _term_months(term)
+    if months is None:
+        return ''
+    value = PDF_EPO_SCHEDULES.get(canonical, {}).get(months)
+    return str(value) if value is not None else ''
+
+
 def _clean(value: Any) -> str:
     return re.sub(r'\s+', ' ', '' if value is None else str(value)).strip()
 
@@ -631,21 +677,34 @@ def _sum_rates(*values: str) -> str:
 
 
 def _detect_pdf_provider(text: str, filename: str = '') -> str:
-    compact = re.sub(r'[^a-z0-9]+', '', _clean(text).casefold())
+    raw_text = _clean(text).casefold()
+    compact = re.sub(r'[^a-z0-9]+', '', raw_text)
     if 'choicecapital' in compact:
         return 'CHOICE CAPITAL'
-    if 'rentabarn' in compact:
+    # RentaBarn contracts may identify the provider as Wolfvalley/Wolf Valley
+    # or WVB.  They all intentionally use the same RentaBarn EPO schedule.
+    if 'rentabarn' in compact or 'wolfvalley' in compact or re.search(r'\bwvb\b', raw_text, flags=re.I):
         return 'RENTABARN'
+    if re.search(r'(?<![a-z0-9])dbm(?![a-z0-9])', raw_text, flags=re.I):
+        return 'DBM'
+    if 'xgen' in compact:
+        return 'X-GEN'
 
-    # Some Choice Capital downloads render the provider/logo as artwork instead
+    # Some provider logos render as artwork instead of selectable text, so use
+    # filename tokens only as a fallback after inspecting PDF text itself.
     # of selectable text. Their detailed-information filenames include the CF
     # source token (e.g. PDF-01_CF_6-60376_DetailedInformationPage_...).
     # Use this only as a fallback after inspecting the PDF text itself.
     name = Path(str(filename or '')).name
     if re.search(r'(?:^|[_\-])CF(?:[_\-]|$)', name, flags=re.I):
         return 'CHOICE CAPITAL'
-    if re.search(r'(?:^|[_\-])RB(?:[_\-]|$)', name, flags=re.I) or 'rentabarn' in name.casefold():
+    if (re.search(r'(?:^|[_\-])(?:RB|WVB)(?:[_\-]|$)', name, flags=re.I)
+            or 'rentabarn' in name.casefold() or 'wolfvalley' in re.sub(r'[^a-z0-9]+', '', name.casefold())):
         return 'RENTABARN'
+    if re.search(r'(?:^|[_\-])DBM(?:[_\-]|$)', name, flags=re.I):
+        return 'DBM'
+    if re.search(r'(?:^|[_\-])X[ _\-]?GEN(?:[_\-]|$)', name, flags=re.I) or 'xgen' in re.sub(r'[^a-z0-9]+', '', name.casefold()):
+        return 'X-GEN'
     return ''
 
 
@@ -773,6 +832,7 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
         sac_raw = _get(fields, 'contract', '90 Days SAC')
         sac_date = _date_from_value(sac_raw)
         term = _get(fields, 'contract', 'RTO Terms')
+        epo_percentage = pdf_epo_percentage(pdf_provider, term)
         city_tax = _get(fields, 'contract', 'City Tax')
         county_tax = _get(fields, 'contract', 'County Tax')
         # Critical payment values: prefer the value printed on the same visual
@@ -855,7 +915,7 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             'Purchase Reserve': reserve,
             'Months Of Term': term,
             'Building Cost': cash_price,
-            'Early Purchase Percentage': '',
+            'Early Purchase Percentage': epo_percentage,
             'Monthly Subtotal': pmt_before_tax,
             'Sum Of All Tax Rates': _sum_rates(city_tax, county_tax),
             # No ShedSuite URLs exist for this source. The original uploaded PDF
@@ -869,6 +929,8 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             '_import_source_type': 'pdf',
             '_import_pdf_name': path.name,
             '_pdf_provider': pdf_provider,
+            '_pdf_epo_percentage': epo_percentage,
+            '_pdf_epo_term_months': str(_term_months(term) or ''),
             '_pdf_salesperson_source': salesperson,
             '_pdf_contract_price': _money(_get(fields, 'contract', 'Contract Price')),
             '_pdf_sac_date': sac_date,
@@ -916,6 +978,10 @@ def parse_contract_pdf(path: Path) -> tuple[dict[str, str], dict[str, str], list
             warnings.append(f'{path.name}: PDF parser could not find PMT Before Tax; review RATE1 manually.')
         if not total_monthly_pmt:
             warnings.append(f'{path.name}: PDF parser could not find Total Monthly PMT; verify the final RTO payment manually.')
+        if pdf_provider and _term_months(term) and not epo_percentage:
+            warnings.append(
+                f'{path.name}: no configured EPO percentage for {pdf_provider} at {_term_months(term)} months; review PAYOFFDISCOUNT manually.'
+            )
         if salesperson:
             warnings.append(f'{path.name}: salesperson extracted from PDF: {salesperson}.')
 
