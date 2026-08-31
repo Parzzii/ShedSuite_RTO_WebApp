@@ -80,6 +80,21 @@ COMPANY_RULES = {
         'profile': 'CRF_4_SEASONS', 'login': 'conrad.s+wv@evergreenrto.com', 'store_title': '1 Carefree', 'store': '1',
         'zone_selector': '4 Seasons, 0150'
     },
+    # V7.20.1: White River / Crestwood onboarding. This is intentionally a
+    # direct mapping so Delivery Certificate lookup uses the correct ShedSuite
+    # tenant immediately instead of trying unrelated logins.
+    'crestwood storage barns': {
+        'profile': '', 'login': 'info@whiteriverrto.com', 'store_title': '13 Crestwood', 'store': '13',
+        'zone_selector': 'Crestwood Storage Barns, 1301', 'zone': '1301'
+    },
+    'crestwood storage barns llc': {
+        'profile': '', 'login': 'info@whiteriverrto.com', 'store_title': '13 Crestwood', 'store': '13',
+        'zone_selector': 'Crestwood Storage Barns, 1301', 'zone': '1301'
+    },
+    'crestwood storage barns, llc': {
+        'profile': '', 'login': 'info@whiteriverrto.com', 'store_title': '13 Crestwood', 'store': '13',
+        'zone_selector': 'Crestwood Storage Barns, 1301', 'zone': '1301'
+    },
 }
 
 
@@ -101,6 +116,7 @@ KNOWN_STORES = [
     {'store': '8', 'storetitle': '8 Magnolia', 'storename': 'Magnolia'},
     {'store': '11', 'storetitle': '11 Westwood', 'storename': 'Westwood'},
     {'store': '12', 'storetitle': '12 Choice Capital', 'storename': 'Choice Capital'},
+    {'store': '13', 'storetitle': '13 Crestwood', 'storename': 'Crestwood Storage Barns'},
 ]
 
 
@@ -809,7 +825,7 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
         store_title = rule.get('store_title', '')
         zone_selector = rule.get('zone_selector', '')
         is_pdf_source = clean_text(src.get('_import_source_type')).casefold() == 'pdf'
-        zone = find_zone(ref, zone_selector, store, src.get('Dealer', '') if is_pdf_source else '')
+        zone = clean_text(rule.get('zone')) or find_zone(ref, zone_selector, store, src.get('Dealer', '') if is_pdf_source else '')
         stock_model = find_stock_model(ref, serial)
         default_model = stock_model or inventory_id or 'Not Found'
         default_contract_check = order_id

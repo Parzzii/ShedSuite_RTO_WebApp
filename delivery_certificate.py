@@ -112,6 +112,8 @@ def _legacy_logins(base: Path) -> tuple[list[tuple[str, str]], Path | None, str]
 def _preferred_login(company: str, dealer: str) -> list[str]:
     """Same company/login selection idea used by the old Excel macro."""
     text = f'{company} {dealer}'.lower()
+    if 'crestwood storage barns' in text or 'crestwood' in text:
+        return ['info@whiteriverrto.com']
     if 'smart shed' in text or 'magnolia' in text:
         return ['office@magnoliarto.com']
     if 'lonestar' in text or re.search(r'\blsr\b', text):
