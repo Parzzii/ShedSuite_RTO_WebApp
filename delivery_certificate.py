@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 import fitz
@@ -15,6 +17,118 @@ from pdf_tools import bytes_to_pdf, safe_filename
 
 BASE_URL = 'https://app.shedsuite.com/rto/order/'
 HOME_URL = 'https://app.shedsuite.com/'
+
+# V7.21: persistent ShedSuite company -> login mapping.  New companies should
+# never make the worker blindly cycle through every Logininfo account.  The
+# mapping lives outside the version folder so one choice survives upgrades.
+_LOGIN_MAPPING_LOCK = threading.RLock()
+
+
+def _login_mapping_path() -> Path:
+    override = str(os.getenv('SHEDSUITE_LOGIN_MAPPING_FILE', '') or '').strip()
+    if override:
+        return Path(override).expanduser()
+    if os.name == 'nt':
+        root = Path(os.getenv('LOCALAPPDATA') or Path.home())
+        return root / 'ShedSuiteRTO' / 'shedsuite_login_mappings.json'
+    return Path.home() / '.shedsuite_rto' / 'shedsuite_login_mappings.json'
+
+
+def _login_entity_key(value: str) -> str:
+    text = str(value or '').casefold().replace('&', ' and ')
+    words = re.findall(r'[a-z0-9]+', text)
+    disposable = {
+        'llc', 'inc', 'incorporated', 'corp', 'corporation', 'company', 'co',
+        'limited', 'ltd', 'buildings', 'building', 'enterprises', 'enterprise',
+    }
+    words = [w for w in words if w not in disposable]
+    return ' '.join(words).strip()
+
+
+def shedsuite_login_key(company: str, dealer: str = '') -> str:
+    """Stable company key used for local ShedSuite-login learning."""
+    company_key = _login_entity_key(company)
+    if company_key:
+        return company_key
+    return _login_entity_key(dealer)
+
+
+def _load_login_mappings() -> dict:
+    path = _login_mapping_path()
+    with _LOGIN_MAPPING_LOCK:
+        if not path.exists():
+            return {'version': 1, 'mappings': {}}
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            return {'version': 1, 'mappings': {}}
+        if not isinstance(data, dict):
+            return {'version': 1, 'mappings': {}}
+        if not isinstance(data.get('mappings'), dict):
+            data['mappings'] = {}
+        return data
+
+
+def _save_login_mappings(data: dict) -> None:
+    path = _login_mapping_path()
+    with _LOGIN_MAPPING_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix('.tmp')
+        temp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        temp.replace(path)
+
+
+def saved_shedsuite_login(company: str, dealer: str = '') -> str:
+    key = shedsuite_login_key(company, dealer)
+    if not key:
+        return ''
+    item = (_load_login_mappings().get('mappings', {}) or {}).get(key, {})
+    return str(item.get('email', '') if isinstance(item, dict) else item or '').strip()
+
+
+def save_shedsuite_login_mapping(company: str, dealer: str, email: str) -> bool:
+    key = shedsuite_login_key(company, dealer)
+    email = str(email or '').strip()
+    if not key or not email:
+        return False
+    data = _load_login_mappings()
+    mappings = data.setdefault('mappings', {})
+    mappings[key] = {
+        'email': email,
+        'company': str(company or '').strip(),
+        'dealer': str(dealer or '').strip(),
+    }
+    data['version'] = 1
+    _save_login_mappings(data)
+    return True
+
+
+def available_shedsuite_login_emails(base: Path) -> list[str]:
+    """Return Logininfo email choices without exposing passwords."""
+    logins, _book, _selected = _legacy_logins(base)
+    return [email for email, _password in logins]
+
+
+def resolve_shedsuite_login(company: str, dealer: str = '', explicit_login: str = '') -> tuple[str, str]:
+    """Resolve one deterministic login and report why it was chosen.
+
+    This function deliberately never returns an arbitrary fallback login.  If a
+    new company is not mapped, the UI must ask once instead of Chromium trying
+    unrelated tenants for up to two minutes each.
+    """
+    explicit_login = str(explicit_login or '').strip()
+    # A user-confirmed saved mapping is allowed to override an older built-in
+    # company rule. That makes onboarding/fixing a login possible without
+    # editing Python again.
+    learned = saved_shedsuite_login(company, dealer)
+    if learned:
+        return learned, 'saved mapping'
+    if explicit_login:
+        return explicit_login, 'company rule'
+    preferred = _preferred_login(company, dealer)
+    if preferred:
+        return preferred[0], 'built-in mapping'
+    return '', 'mapping needed'
 
 
 def _safe_email(email: str) -> str:
@@ -588,25 +702,20 @@ async def _run(
         semaphore = asyncio.Semaphore(concurrency)
         pending_prefetch: dict[str, tuple[dict, Path, str, str]] = {}
 
-        def ordered_logins_for(row: dict) -> list[tuple[str, str]]:
+        def ordered_logins_for(row: dict) -> tuple[list[tuple[str, str]], str, str]:
+            """Return exactly one resolved login; never cycle unrelated tenants."""
             oid = str(row.get('_source_order_id', '')).strip()
             src = src_by_order.get(oid, {})
-            v3_login = str(row.get('_login') or '').strip()
-            ordered: list[tuple[str, str]] = []
-            if v3_login:
-                item = login_map.get(v3_login.lower())
-                if item:
-                    ordered.append(item)
-                return ordered
-
-            preferred = _preferred_login(src.get('Company Name', ''), src.get('Dealer', ''))
-            for email in preferred:
-                item = login_map.get(email.lower())
-                if item and item not in ordered:
-                    ordered.append(item)
-            if not ordered:
-                ordered.extend(logins)
-            return ordered
+            company = str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip()
+            dealer = str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip()
+            explicit = str(row.get('_login') or '').strip()
+            email, reason = resolve_shedsuite_login(company, dealer, explicit)
+            if not email:
+                return [], '', reason
+            item = login_map.get(email.lower())
+            if not item:
+                return [], email, 'mapped login is not present in Logininfo'
+            return [item], email, reason
 
         async def get_context(email: str, password: str):
             key = email.lower()
@@ -651,21 +760,23 @@ async def _run(
             if should_process and not should_process(oid):
                 return
 
-            ordered = ordered_logins_for(row)
-            v3_login = str(row.get('_login') or '').strip()
-            if v3_login and not ordered:
-                warnings.append(
-                    f"{row.get('NAME') or oid}: Delivery Certificate: "
-                    f"V3 selected ShedSuite login {v3_login}, but that login was not found in Logininfo."
-                )
-                row['_delivery_certificate'] = 'Missing'
+            ordered, resolved_email, login_reason = ordered_logins_for(row)
+            if not ordered:
+                company = str(src_by_order.get(oid, {}).get('Company Name', '') or row.get('_source_company', '') or '').strip()
+                dealer = str(src_by_order.get(oid, {}).get('Dealer', '') or row.get('_source_dealer', '') or '').strip()
+                row['_delivery_certificate'] = 'Login mapping needed'
                 row['_delivery_certificate_method'] = ''
+                if resolved_email:
+                    detail = f'ShedSuite login {resolved_email} is mapped to this company but is not present in Logininfo.'
+                else:
+                    detail = f'ShedSuite login mapping needed for {company or dealer or "this company"}. Choose it once in Review.'
+                warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate: {detail}")
                 if progress:
-                    progress(oid, 'missing', f'Login mapping not found for {v3_login}.', row)
+                    progress(oid, 'login_needed', detail, row)
                 return
 
             if progress:
-                progress(oid, 'working', 'Prefetching Delivery Certificate from ShedSuite…', row)
+                progress(oid, 'working', f'Using ShedSuite login {resolved_email} ({login_reason}). Prefetching Delivery Certificate…', row)
 
             cert_data = None
             method = ''
@@ -689,6 +800,14 @@ async def _run(
                         last_error = method
                     except Exception as exc:
                         last_error = str(exc)
+
+            if cert_data and resolved_email:
+                src = src_by_order.get(oid, {})
+                save_shedsuite_login_mapping(
+                    str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip(),
+                    str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip(),
+                    resolved_email,
+                )
 
             if not cert_data:
                 row['_delivery_certificate'] = 'Missing'

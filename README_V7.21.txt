@@ -1,8 +1,46 @@
-ShedSuite RTO Web App V7.18
+ShedSuite RTO Web App V7.21
 ===========================
 
 This is the single consolidated README / changelog for the project.
 New entries are added at the top. Older behavior remains unless a later entry says it was changed.
+
+
+V7.21 - Deterministic ShedSuite login mapping for new companies
+-----------------------------------------------------------------
+- Delivery Certificate retrieval no longer cycles through every Logininfo account when a company has no known ShedSuite login.
+- Existing built-in company login mappings continue to go directly to the known account.
+- New/unmapped companies are marked LOGIN NEEDED instead of opening unrelated ShedSuite tenants.
+- Review shows a one-time ShedSuite Login selector containing email addresses from the local Logininfo table (passwords are never sent to the browser).
+- Choosing Remember & Retry saves Company -> ShedSuite login locally and automatically retries the waiting contracts.
+- Saved mappings persist across jobs and future app versions at %LOCALAPPDATA%\ShedSuiteRTO\shedsuite_login_mappings.json by default.
+- Company-name normalization ignores common legal suffixes such as LLC, Inc., Company and Buildings, so minor naming variants reuse the same login.
+- A user-confirmed saved login mapping overrides an older built-in guess, allowing a wrong mapping to be corrected without changing Python code.
+- Successful certificate retrieval also reinforces/saves the resolved company login mapping.
+
+
+V7.20 - PDF EPO schedules
+--------------------------
+- PDF contracts now populate Early Purchase Percentage from provider + RTO term and feed it through the same PAYOFFDISCOUNT conversion already used by ShedSuite CSV imports.
+- DBM: 24mo=65%, 36mo=60%, 48mo=55%, 60mo=45%.
+- Choice Capital: 24mo=65%, 36mo=60%, 48mo=55%, 60mo=45%.
+- RentaBarn / Wolfvalley / Wolf Valley / WVB: 24mo=70%, 36mo=60%, 48mo=50%, 60mo=45%.
+- X-Gen: 24mo=70%, 36mo=60%, 48mo=55%, 54mo=55%, 60mo=50%, 72mo=45%.
+- Unsupported provider/term combinations are left blank and flagged instead of guessed.
+- If a PDF contract term is manually corrected and saved, PAYOFFDISCOUNT is recalculated from the provider schedule.
+- The PDF payment audit now shows the detected EPO percentage and resulting PAYOFFDISCOUNT for verification.
+
+
+V7.19 - Repeat-import Used detection + correction-learning fix
+----------------------------------------------------------------
+- Repeat imports now identify the physical building by exact Serial before allocating a new model number.
+- If that serial is already tied to an RTO Inventory model with rental contract history, the historical model is restored and the row is automatically marked Used.
+- Example: first import assigned model/contract 501; running the same CSV again now keeps MODEL1=501 and generates CONTRACT=501U (then 501A, 501B, etc. if needed) instead of assigning 502.
+- A STOCK-only serial does not become Used just because it exists in inventory.
+- Used-detection reason now explains the exact serial, historical RTO model/status and matching contract history when available.
+- Learned Category is now displayed only when learned memory actually changes the category value.
+- Learned/manual category text is preserved on save/export instead of being silently remapped back to the automatic category guess.
+- Category remains type-or-select; approved values still get canonical spelling, but custom typed values are respected.
+- Inventory Category uses the same preserve-typed-value behavior.
 
 V7.18 - Consolidated README + RTO Pro no-open import
 -----------------------------------------------------

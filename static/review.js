@@ -543,7 +543,7 @@
   function certChip(r) {
     const item=certItemForRow(r);
     const state=clean(item?.status || (r._delivery_certificate==='Downloaded'?'ready':r._delivery_certificate==='Missing'?'missing':r._delivery_certificate==='Queued'?'queued':'not_requested')).toLowerCase();
-    const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED',not_requested:''};
+    const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',login_needed:'LOGIN NEEDED',skipped:'CERT SKIPPED',discarded:'DISCARDED',not_requested:''};
     const label=labels[state] || state.toUpperCase();
     return label ? `<span class="delivery-chip ${esc(state)}" data-cert-order="${esc(r._source_order_id)}">${esc(label)}</span>` : '';
   }
@@ -555,7 +555,7 @@
     const oid=clean(r._source_order_id);
     let buttons='';
     if (state==='missing' || state==='skipped') buttons+=`<button type="button" class="mini-btn cert-retry" data-order="${esc(oid)}">Retry certificate</button>`;
-    if (state==='queued' || state==='missing') buttons+=`<button type="button" class="mini-btn cert-skip" data-order="${esc(oid)}">Skip</button>`;
+    if (state==='queued' || state==='missing' || state==='login_needed') buttons+=`<button type="button" class="mini-btn cert-skip" data-order="${esc(oid)}">Skip</button>`;
     if (state==='ready') buttons+=`<a class="mini-btn" target="_blank" href="/pdf/${encodeURIComponent(window.RTO_JOB)}/${i}">Open combined PDF</a>`;
     if (!state && !detail) return '';
     return `<div class="cert-row-actions" data-cert-actions="${esc(oid)}">${certChip(r)}${detail?`<span class="mini-muted">${esc(detail)}</span>`:''}${buttons}</div>`;
@@ -655,13 +655,13 @@
     document.getElementById('deliveryProgressBar').style.width=`${pct}%`;
     document.getElementById('deliveryProgressCount').textContent=`${done}/${total}`;
     document.getElementById('deliveryWorkerState').textContent=deliveryStatus.active?'Running in background':'Complete';
-    const working=Number(c.working||0), prefetched=Number(c.prefetched||0), queued=Number(c.queued||0), ready=Number(c.ready||0), missing=Number(c.missing||0), skipped=Number(c.skipped||0);
-    document.getElementById('deliveryProgressText').textContent=deliveryStatus.active ? (working?'Chromium is prefetching certificates. You can keep editing.':prefetched?'Certificates are prefetched and waiting for packet assembly.':'Chromium is running in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.');
-    document.getElementById('deliveryProgressStats').innerHTML=[ready?`<span>✓ ${ready} Ready</span>`:'',prefetched?`<span>⚡ ${prefetched} Prefetched</span>`:'',working?`<span>⏳ ${working} Prefetching</span>`:'',queued?`<span>○ ${queued} Waiting</span>`:'',missing?`<span>⚠ ${missing} Missing</span>`:'',skipped?`<span>↷ ${skipped} Skipped</span>`:''].filter(Boolean).join('');
+    const working=Number(c.working||0), prefetched=Number(c.prefetched||0), queued=Number(c.queued||0), ready=Number(c.ready||0), missing=Number(c.missing||0), loginNeeded=Number(c.login_needed||0), skipped=Number(c.skipped||0);
+    document.getElementById('deliveryProgressText').textContent=loginNeeded?'One or more new companies need a ShedSuite login mapping above.':(deliveryStatus.active ? (working?'Chromium is prefetching certificates. You can keep editing.':prefetched?'Certificates are prefetched and waiting for packet assembly.':'Chromium is running in the background. You can keep editing.') : (deliveryStatus.error?`Finished with an error: ${deliveryStatus.error}`:'Background certificate work is finished.'));
+    document.getElementById('deliveryProgressStats').innerHTML=[ready?`<span>✓ ${ready} Ready</span>`:'',prefetched?`<span>⚡ ${prefetched} Prefetched</span>`:'',working?`<span>⏳ ${working} Prefetching</span>`:'',queued?`<span>○ ${queued} Waiting</span>`:'',loginNeeded?`<span>🔑 ${loginNeeded} Login mapping needed</span>`:'',missing?`<span>⚠ ${missing} Missing</span>`:'',skipped?`<span>↷ ${skipped} Skipped</span>`:''].filter(Boolean).join('');
 
     document.querySelectorAll('[data-cert-order]').forEach(el=>{
       const item=(deliveryStatus.items||{})[el.dataset.certOrder]; if(!item)return;
-      const state=clean(item.status).toLowerCase(); const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',skipped:'CERT SKIPPED',discarded:'DISCARDED'};
+      const state=clean(item.status).toLowerCase(); const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',login_needed:'LOGIN NEEDED',skipped:'CERT SKIPPED',discarded:'DISCARDED'};
       el.className=`delivery-chip ${state}`; el.textContent=labels[state] || state.toUpperCase();
     });
     // Update the richer PDF-tab status only when that tab is currently visible.
@@ -670,11 +670,53 @@
       const item=(deliveryStatus.items||{})[oid] || {}; const state=clean(item.status).toLowerCase();
       let buttons='';
       if (state==='missing' || state==='skipped') buttons+=`<button type="button" class="mini-btn cert-retry" data-order="${esc(oid)}">Retry certificate</button>`;
-      if (state==='queued' || state==='missing') buttons+=`<button type="button" class="mini-btn cert-skip" data-order="${esc(oid)}">Skip</button>`;
+      if (state==='queued' || state==='missing' || state==='login_needed') buttons+=`<button type="button" class="mini-btn cert-skip" data-order="${esc(oid)}">Skip</button>`;
       if (state==='ready') buttons+=`<a class="mini-btn" target="_blank" href="/pdf/${encodeURIComponent(window.RTO_JOB)}/${i}">Open combined PDF</a>`;
       el.innerHTML=`${certChip(rows[i])}${item.detail?`<span class="mini-muted">${esc(item.detail)}</span>`:''}${buttons}`;
       el.querySelectorAll('.cert-retry').forEach(b=>b.addEventListener('click',()=>retryCertificate(b.dataset.order,b)));
       el.querySelectorAll('.cert-skip').forEach(b=>b.addEventListener('click',()=>skipCertificate(b.dataset.order,b)));
+    });
+  }
+
+  function bindShedSuiteLoginMappings() {
+    const dataEl=document.getElementById('shedsuiteLoginNeeds');
+    const panel=document.getElementById('loginMappingPanel');
+    if (!dataEl || !panel) return;
+    let needs=[];
+    try { needs=JSON.parse(dataEl.textContent || '[]'); } catch(e) { needs=[]; }
+    panel.querySelectorAll('[data-login-map-index]').forEach(rowEl=>{
+      const idx=Number(rowEl.dataset.loginMapIndex);
+      const item=needs[idx] || {};
+      const select=rowEl.querySelector('.shedsuite-login-select');
+      const button=rowEl.querySelector('.shedsuite-login-save');
+      const result=rowEl.querySelector('.login-map-result');
+      if (!button || !select) return;
+      button.addEventListener('click',async()=>{
+        const email=clean(select.value);
+        if (!email) { if(result) result.textContent='Choose the correct ShedSuite login first.'; return; }
+        const old=button.textContent; button.disabled=true; button.textContent='Saving…';
+        try {
+          const resp=await fetch(`/api/shedsuite-login-map/${encodeURIComponent(window.RTO_JOB)}`,{
+            method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({company:item.company||'',dealer:item.dealer||'',email,orders:item.orders||[]})
+          });
+          const data=await resp.json().catch(()=>({}));
+          if(!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+          rowEl.classList.add('mapped');
+          if(result) result.textContent=`Remembered ${email}. Certificate retry queued automatically.`;
+          button.textContent='Mapped ✓';
+          select.disabled=true;
+          setTimeout(()=>{
+            rowEl.style.display='none';
+            const visible=[...panel.querySelectorAll('[data-login-map-index]')].some(el=>el.style.display!=='none');
+            if(!visible) panel.style.display='none';
+          },1200);
+          await pollDeliveryStatus();
+        } catch(e) {
+          if(result) result.textContent=`Could not save mapping: ${e.message || e}`;
+          button.disabled=false; button.textContent=old;
+        }
+      });
     });
   }
 
@@ -1291,5 +1333,5 @@
     render();
   });
   searchInput.addEventListener('input',render); onlyNeeds.addEventListener('change',render);
-  populateBulkStore(); render(); pollDeliveryStatus();
+  populateBulkStore(); render(); bindShedSuiteLoginMappings(); pollDeliveryStatus();
 })();

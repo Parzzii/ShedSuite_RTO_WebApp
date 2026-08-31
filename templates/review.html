@@ -45,6 +45,40 @@
 
     {% if refs.error %}<div class="connection-warning"><strong>Firebird lookup:</strong> {{refs.error}}<br><span>You can still edit manually, but Dealer/Zone/Tax dropdowns need the DSN connection for the complete RTO Pro lists.</span></div>{% endif %}
 
+    {% if shedsuite_login_needs %}
+    <section class="login-mapping-panel" id="loginMappingPanel">
+      <div class="login-mapping-head">
+        <div>
+          <div class="eyebrow">ONE-TIME SETUP</div>
+          <h2>ShedSuite login mapping needed</h2>
+          <p>A new company is not mapped to a ShedSuite account yet. Choose the correct login once; V7.21 remembers it for future imports and versions.</p>
+        </div>
+        <span class="db-pill bad">{{ shedsuite_login_needs|length }} compan{{ 'y' if shedsuite_login_needs|length == 1 else 'ies' }}</span>
+      </div>
+      <div class="login-mapping-list">
+        {% for item in shedsuite_login_needs %}
+        <div class="login-mapping-row" data-login-map-index="{{ loop.index0 }}">
+          <div class="login-company">
+            <strong>{{ item.company }}</strong>
+            {% if item.dealer %}<span>Dealer: {{ item.dealer }}</span>{% endif %}
+            <small>{{ item.orders|length }} contract{{ '' if item.orders|length == 1 else 's' }} waiting</small>
+          </div>
+          <label>ShedSuite login
+            <select class="shedsuite-login-select">
+              <option value="">Choose login…</option>
+              {% for email in shedsuite_login_options %}<option value="{{ email }}" {% if item.current_login == email %}selected{% endif %}>{{ email }}</option>{% endfor %}
+            </select>
+          </label>
+          <button type="button" class="primary shedsuite-login-save">Remember &amp; Retry</button>
+          <span class="login-map-result" aria-live="polite"></span>
+        </div>
+        {% endfor %}
+      </div>
+      {% if not shedsuite_login_options %}<div class="connection-warning"><strong>No Logininfo emails found.</strong> Put Contract_Import.xlsm where the app can find it, then refresh.</div>{% endif %}
+    </section>
+    <script id="shedsuiteLoginNeeds" type="application/json">{{ shedsuite_login_needs|tojson }}</script>
+    {% endif %}
+
     <section class="control-panel">
       <label class="searchbox">Search contracts<input id="searchInput" placeholder="name, order, serial, dealer…"></label>
       <label>Bulk store <select id="bulkStore"></select></label>
