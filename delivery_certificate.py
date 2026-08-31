@@ -944,40 +944,102 @@ async def _run(
         validated_mapping_cache: dict[str, str] = {}
 
         async def probe_account_for_order(email: str, password: str, oid: str, row: dict) -> bool:
-            """Quickly determine whether one tenant owns the order without waiting for attachments."""
+            """Determine whether one tenant owns the order without rejecting slow React pages too early.
+
+            V7.22 used a fixed 1.8 second sleep and a few text markers. Some
+            valid orders render their detail/files area later, so the correct
+            tenant could be incorrectly rejected and discovery would continue
+            through every saved login. V7.22.1 polls the actual order route for
+            up to ~12 seconds, watches for negative/positive evidence, and treats
+            a stable exact order URL with a rendered authenticated page as a
+            positive fallback.
+            """
             key = email.lower()
             lock = login_locks.setdefault(key, asyncio.Lock())
             async with lock:
                 context, page = await get_context(email, password)
+                target_url = BASE_URL + str(oid)
                 try:
-                    await page.goto(BASE_URL + str(oid), wait_until='domcontentloaded', timeout=90000)
+                    await page.goto(target_url, wait_until='domcontentloaded', timeout=90000)
                 except Exception:
                     return False
-                await page.wait_for_timeout(1800)
+
+                # ShedSuite is React-driven. Best-effort network-idle helps when
+                # available, but we do not make discovery depend on it.
                 try:
-                    if '/login' in str(page.url).lower():
-                        return False
+                    await page.wait_for_load_state('networkidle', timeout=6000)
                 except Exception:
                     pass
-                try:
-                    body = re.sub(r'\s+', ' ', (await page.locator('body').inner_text()) or '').casefold()
-                except Exception:
-                    body = ''
-                negatives = ('order not found', 'not found', 'does not exist', 'access denied', 'unauthorized', 'forbidden')
-                if any(x in body for x in negatives):
-                    return False
-                if str(oid).casefold() in body:
-                    return True
+
                 name = str(row.get('NAME', '') or '').strip().casefold()
                 last = name.split()[-1] if name else ''
-                try:
-                    file_count = await page.locator('[class*="fileName"]').count()
-                except Exception:
-                    file_count = 0
-                positive_markers = ('customer information', 'order details', 'contract information', 'files', 'documents')
-                if file_count > 0:
-                    return True
-                if last and len(last) >= 3 and last in body and any(x in body for x in positive_markers):
+                oid_cf = str(oid).casefold()
+                negatives = (
+                    'order not found', 'order does not exist', 'does not exist',
+                    'access denied', 'unauthorized', 'forbidden', 'permission denied',
+                )
+                positive_markers = (
+                    'customer information', 'order details', 'contract information',
+                    'files', 'documents', 'delivery information', 'payment information',
+                )
+
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 12.0
+                last_body = ''
+                exact_route_seen = False
+
+                while loop.time() < deadline:
+                    try:
+                        current_url = str(page.url or '')
+                    except Exception:
+                        current_url = ''
+                    current_low = current_url.casefold()
+                    if '/login' in current_low:
+                        return False
+
+                    # Exact route is strong evidence, but still allow the page a
+                    # moment to render an explicit Not Found / Access Denied state.
+                    normalized_target = target_url.rstrip('/').casefold()
+                    normalized_current = current_url.split('?', 1)[0].rstrip('/').casefold()
+                    if normalized_current == normalized_target:
+                        exact_route_seen = True
+
+                    try:
+                        body = re.sub(r'\s+', ' ', (await page.locator('body').inner_text()) or '').casefold()
+                    except Exception:
+                        body = ''
+                    if body:
+                        last_body = body
+
+                    if any(x in body for x in negatives):
+                        return False
+                    if oid_cf and oid_cf in body:
+                        return True
+
+                    try:
+                        file_count = await page.locator('[class*="fileName"]').count()
+                    except Exception:
+                        file_count = 0
+                    if file_count > 0:
+                        return True
+
+                    if last and len(last) >= 3 and last in body and any(x in body for x in positive_markers):
+                        return True
+
+                    # Generic order-detail markers are enough when the browser is
+                    # still on the exact requested order route. This catches
+                    # orders whose order number/name is not repeated in body text.
+                    if exact_route_seen and any(x in body for x in positive_markers):
+                        return True
+
+                    await page.wait_for_timeout(750)
+
+                # Final fallback: if authentication succeeded, the browser stayed
+                # on the exact requested order route for the whole probe, the page
+                # rendered substantive content, and there was no explicit negative
+                # state, treat it as the owning tenant rather than cycling through
+                # every other login.
+                if exact_route_seen and len(last_body) >= 120 and not any(x in last_body for x in negatives):
                     return True
                 return False
 

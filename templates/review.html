@@ -52,7 +52,7 @@
         <div>
           <div class="eyebrow">ONE-TIME SETUP</div>
           <h2>ShedSuite login mapping needed</h2>
-          <p>V7.22 first tries your saved ShedSuite accounts automatically. If discovery cannot identify the tenant, choose a login here as a manual fallback; the mapping is then remembered for future imports.</p>
+          <p>V7.22.1 first tries your saved ShedSuite accounts automatically. If discovery cannot identify the tenant, choose a login here as a manual fallback; the mapping is then remembered for future imports.</p>
         </div>
         <a class="button ghost account-settings-link" href="{{ url_for('shedsuite_accounts_page', job=job) }}">+ Manage accounts</a>
         <span class="db-pill bad">{{ shedsuite_login_needs|length }} compan{{ 'y' if shedsuite_login_needs|length == 1 else 'ies' }}</span>
@@ -76,7 +76,7 @@
         </div>
         {% endfor %}
       </div>
-      {% if not shedsuite_login_options %}<div class="connection-warning"><strong>No ShedSuite accounts saved.</strong> <a href="{{ url_for('shedsuite_accounts_page', job=job) }}">Add a ShedSuite login</a>, then return here. V7.22 will retry automatic discovery.</div>{% endif %}
+      {% if not shedsuite_login_options %}<div class="connection-warning"><strong>No ShedSuite accounts saved.</strong> <a href="{{ url_for('shedsuite_accounts_page', job=job) }}">Add a ShedSuite login</a>, then return here. V7.22.1 will retry automatic discovery.</div>{% endif %}
     </section>
     <script id="shedsuiteLoginNeeds" type="application/json">{{ shedsuite_login_needs|tojson }}</script>
     {% endif %}
