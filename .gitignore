@@ -15,3 +15,6 @@ __pycache__/
 # OS/editor files
 .DS_Store
 Thumbs.db
+
+# Cached ShedSuite browser sessions / authentication state
+auth_state/

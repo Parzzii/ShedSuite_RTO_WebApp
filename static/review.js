@@ -664,6 +664,23 @@
       const state=clean(item.status).toLowerCase(); const labels={queued:'CERT QUEUED',working:'CERT PREFETCHING',prefetched:'CERT PREFETCHED',ready:'CERT READY',missing:'CERT MISSING',login_needed:'LOGIN NEEDED',skipped:'CERT SKIPPED',discarded:'DISCARDED'};
       el.className=`delivery-chip ${state}`; el.textContent=labels[state] || state.toUpperCase();
     });
+
+    // V7.22: a mapping row is only a fallback. If automatic tenant discovery
+    // moves every order in that group past LOGIN NEEDED, hide the fallback row.
+    const loginNeedsEl=document.getElementById('shedsuiteLoginNeeds');
+    const loginPanel=document.getElementById('loginMappingPanel');
+    if (loginNeedsEl && loginPanel) {
+      let needs=[]; try { needs=JSON.parse(loginNeedsEl.textContent || '[]'); } catch(e) { needs=[]; }
+      loginPanel.querySelectorAll('[data-login-map-index]').forEach(rowEl=>{
+        const idx=Number(rowEl.dataset.loginMapIndex); const group=needs[idx] || {};
+        const orders=Array.isArray(group.orders)?group.orders:[];
+        const stillNeeded=orders.some(oid=>clean(((deliveryStatus.items||{})[oid]||{}).status).toLowerCase()==='login_needed');
+        const anyKnown=orders.some(oid=>!!((deliveryStatus.items||{})[oid]));
+        if (anyKnown && !stillNeeded) rowEl.style.display='none';
+      });
+      const visible=[...loginPanel.querySelectorAll('[data-login-map-index]')].some(el=>el.style.display!=='none');
+      if(!visible) loginPanel.style.display='none';
+    }
     // Update the richer PDF-tab status only when that tab is currently visible.
     document.querySelectorAll('[data-cert-actions]').forEach(el=>{
       const oid=el.dataset.certActions; const i=rows.findIndex(r=>clean(r._source_order_id)===oid); if(i<0)return;

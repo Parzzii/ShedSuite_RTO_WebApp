@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
+  <title>ShedSuite Accounts · V7.22</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell narrow accounts-shell">
+    <header class="accounts-head">
+      <div>
+        <div class="eyebrow">V7.22 · LOCAL SETTINGS</div>
+        <h1>ShedSuite Accounts</h1>
+        <p class="lede small">Add each ShedSuite login once. V7.22 can automatically test these saved accounts for a new company/order, remember the correct tenant, and reuse it on future batches.</p>
+      </div>
+      <div class="accounts-head-actions">
+        {% if job %}<a class="button dark" href="{{ url_for('review', job=job) }}">← Return to review</a>{% else %}<a class="button dark" href="{{ url_for('index') }}">← Home</a>{% endif %}
+      </div>
+    </header>
+
+    {% with messages=get_flashed_messages(with_categories=true) %}
+      {% for cat,msg in messages %}<div class="flash {{ 'ok' if cat == 'success' else cat }}">{{msg}}</div>{% endfor %}
+    {% endwith %}
+
+    <section class="panel account-security-note">
+      <strong>Passwords stay local.</strong>
+      <span>{% if protected_on_windows %}New passwords are encrypted with Windows DPAPI for your current Windows user before being saved.{% else %}This non-Windows environment uses the local account file; production use is intended for the Windows workstation running RTO Pro.{% endif %}</span>
+      <small>Account store: <code>{{ store_path }}</code>. Passwords are never sent to the review page or shown back after saving.</small>
+    </section>
+
+    <section class="panel account-add-panel">
+      <div class="account-section-head">
+        <div><div class="eyebrow">ADD OR UPDATE</div><h2>ShedSuite login</h2></div>
+        <span class="db-pill good">{{ accounts|length }} available</span>
+      </div>
+      <form method="post" action="{{ url_for('shedsuite_accounts_save') }}" class="account-form">
+        <input type="hidden" name="job" value="{{ job }}">
+        <label>Email
+          <input type="email" name="email" placeholder="login@example.com" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input type="password" name="password" placeholder="ShedSuite password" autocomplete="new-password" required>
+        </label>
+        <button class="primary" type="submit">Save account</button>
+      </form>
+      <p class="muted account-help">Saving an email that already exists replaces its locally saved password and clears that account’s cached ShedSuite session so the next background run logs in again.</p>
+    </section>
+
+    <section class="panel account-list-panel">
+      <div class="account-section-head">
+        <div><div class="eyebrow">AVAILABLE TO AUTO-DISCOVERY</div><h2>Saved accounts</h2></div>
+      </div>
+      {% if accounts %}
+        <div class="account-list">
+          {% for account in accounts %}
+          <div class="account-row">
+            <div class="account-email">
+              <strong>{{ account.email }}</strong>
+              <span>{{ 'Saved in V7.22 account vault' if account.source == 'app' else 'Legacy Logininfo workbook' }}</span>
+            </div>
+            <div class="account-state">
+              <span class="db-pill {{ 'good' if account.has_password else 'bad' }}">{{ 'Credential ready' if account.has_password else 'Password unavailable' }}</span>
+              {% if account.source == 'app' %}
+              <form method="post" action="{{ url_for('shedsuite_accounts_delete') }}" onsubmit="return confirm('Remove {{ account.email }} from the V7.22 account vault?');">
+                <input type="hidden" name="job" value="{{ job }}">
+                <input type="hidden" name="email" value="{{ account.email }}">
+                <button type="submit" class="secondary account-delete">Remove</button>
+              </form>
+              {% else %}
+              <span class="mini-muted">Read-only fallback</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-account-state">
+          <strong>No ShedSuite accounts saved yet.</strong>
+          <span>Add the login you use for the new company above. You can add multiple tenant accounts; V7.22 will discover which one owns an unmapped order.</span>
+        </div>
+      {% endif %}
+    </section>
+
+    {% if job %}
+    <section class="account-return-note">
+      <strong>Working on a contract batch?</strong>
+      <span>After you add the needed login(s), return to Review. Waiting Delivery Certificates are automatically re-queued and V7.22 will try to discover the correct account.</span>
+      <a class="button dark" href="{{ url_for('review', job=job) }}">Return to review</a>
+    </section>
+    {% endif %}
+  </main>
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</body>
+</html>

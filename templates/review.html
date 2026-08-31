@@ -20,6 +20,7 @@
       <div class="sticky-actions">
         <button type="button" class="secondary" id="validateBtn">Validate rows</button>
         <button type="button" class="primary" id="saveTopBtn">Save all edits</button>
+        <a class="button ghost" href="{{ url_for('shedsuite_accounts_page', job=job) }}">ShedSuite Accounts</a>
         <a class="button ghost" href="{{ url_for('download', job=job, kind='csv') }}">RTOProImport.csv</a>
         <a class="button dark" href="{{ url_for('download', job=job, kind='zip') }}">Full ZIP</a>
       </div>
@@ -51,8 +52,9 @@
         <div>
           <div class="eyebrow">ONE-TIME SETUP</div>
           <h2>ShedSuite login mapping needed</h2>
-          <p>A new company is not mapped to a ShedSuite account yet. Choose the correct login once; V7.21 remembers it for future imports and versions.</p>
+          <p>V7.22 first tries your saved ShedSuite accounts automatically. If discovery cannot identify the tenant, choose a login here as a manual fallback; the mapping is then remembered for future imports.</p>
         </div>
+        <a class="button ghost account-settings-link" href="{{ url_for('shedsuite_accounts_page', job=job) }}">+ Manage accounts</a>
         <span class="db-pill bad">{{ shedsuite_login_needs|length }} compan{{ 'y' if shedsuite_login_needs|length == 1 else 'ies' }}</span>
       </div>
       <div class="login-mapping-list">
@@ -74,7 +76,7 @@
         </div>
         {% endfor %}
       </div>
-      {% if not shedsuite_login_options %}<div class="connection-warning"><strong>No Logininfo emails found.</strong> Put Contract_Import.xlsm where the app can find it, then refresh.</div>{% endif %}
+      {% if not shedsuite_login_options %}<div class="connection-warning"><strong>No ShedSuite accounts saved.</strong> <a href="{{ url_for('shedsuite_accounts_page', job=job) }}">Add a ShedSuite login</a>, then return here. V7.22 will retry automatic discovery.</div>{% endif %}
     </section>
     <script id="shedsuiteLoginNeeds" type="application/json">{{ shedsuite_login_needs|tojson }}</script>
     {% endif %}

@@ -52,6 +52,9 @@ from delivery_certificate import (
     resolve_shedsuite_login,
     save_shedsuite_login_mapping,
     shedsuite_login_key,
+    list_shedsuite_accounts,
+    save_shedsuite_account,
+    delete_shedsuite_account,
 )
 from pdf_contract_import import parse_contract_pdf, pdf_epo_percentage
 from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
@@ -3339,6 +3342,102 @@ def index():
     )
 
 
+def _waiting_login_orders(job: str) -> set[str]:
+    """Find rows waiting on login discovery/mapping so account changes can retry them."""
+    try:
+        jp = job_path(job)
+    except Exception:
+        return set()
+    if not (jp / 'rows.json').exists():
+        return set()
+    try:
+        status = _read_certificate_status(jp)
+    except Exception:
+        status = {}
+    waiting = {
+        str(oid or '').strip()
+        for oid, item in (status.get('items', {}) or {}).items()
+        if str((item or {}).get('status', '') or '').strip().casefold() == 'login_needed'
+    }
+    if waiting:
+        return {x for x in waiting if x}
+    try:
+        rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
+    except Exception:
+        return set()
+    return {
+        str(r.get('_source_order_id', '') or '').strip()
+        for r in rows
+        if str(r.get('_source_type', 'csv') or 'csv').casefold() != 'pdf'
+        and str(r.get('_delivery_certificate', '') or '').strip().casefold() == 'login mapping needed'
+        and str(r.get('_source_order_id', '') or '').strip()
+    }
+
+
+@app.get('/shedsuite-accounts')
+def shedsuite_accounts_page():
+    job = str(request.args.get('job', '') or '').strip()
+    accounts = list_shedsuite_accounts(BASE, include_legacy=True)
+    return render_template(
+        'shedsuite_accounts.html',
+        accounts=accounts,
+        job=job,
+        store_path=(os.getenv('SHEDSUITE_ACCOUNTS_FILE', '').strip() or (
+            '%LOCALAPPDATA%\\ShedSuiteRTO\\shedsuite_accounts.json' if os.name == 'nt'
+            else '~/.shedsuite_rto/shedsuite_accounts.json'
+        )),
+        protected_on_windows=(os.name == 'nt'),
+    )
+
+
+@app.post('/shedsuite-accounts/save')
+def shedsuite_accounts_save():
+    email = str(request.form.get('email', '') or '').strip()
+    password = str(request.form.get('password', '') or '')
+    job = str(request.form.get('job', '') or '').strip()
+    if not email or '@' not in email:
+        flash('Enter a valid ShedSuite login email.', 'error')
+        return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
+    if not password:
+        flash('Enter the ShedSuite password. Existing passwords are never shown back in the browser.', 'error')
+        return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
+    save_error = ''
+    try:
+        ok = save_shedsuite_account(email, password)
+    except Exception as exc:
+        ok = False
+        save_error = str(exc)
+    if ok:
+        # Old cached auth could belong to a changed password. Remove only this
+        # account's state so the next worker authenticates with the new secret.
+        try:
+            shedsuite_auth_path(email).unlink(missing_ok=True)
+        except Exception:
+            pass
+        flash(f'Saved ShedSuite account {email}.', 'success')
+        if job:
+            waiting = _waiting_login_orders(job)
+            if waiting:
+                _start_certificate_worker_when_idle(job, waiting)
+    else:
+        flash('Could not save ShedSuite account' + (f': {save_error}' if save_error else '.'), 'error')
+    return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
+
+
+@app.post('/shedsuite-accounts/delete')
+def shedsuite_accounts_delete():
+    email = str(request.form.get('email', '') or '').strip()
+    job = str(request.form.get('job', '') or '').strip()
+    if delete_shedsuite_account(email):
+        try:
+            shedsuite_auth_path(email).unlink(missing_ok=True)
+        except Exception:
+            pass
+        flash(f'Removed ShedSuite account {email}.', 'success')
+    else:
+        flash('That account is from the legacy workbook or was not found in the in-app account store.', 'error')
+    return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
+
 
 @app.post('/inventory/start')
 def inventory_start():
@@ -3969,6 +4068,15 @@ def review(job):
 
     shedsuite_login_options, shedsuite_login_needs = _shedsuite_login_review_data(rows, source_rows)
 
+    # V7.22: if accounts were just added while this job was waiting, a normal
+    # return to Review should automatically retry discovery without another click.
+    waiting_login_orders = _waiting_login_orders(job)
+    if waiting_login_orders and shedsuite_login_options:
+        with CERT_ACTIVE_LOCK:
+            busy = job in CERT_ACTIVE
+        if not busy:
+            _start_certificate_worker_when_idle(job, waiting_login_orders)
+
     page_html = render_template(
         'review.html',
         job=job,
@@ -4314,10 +4422,10 @@ def api_shedsuite_login_map(job):
     try:
         available = available_shedsuite_login_emails(BASE)
     except Exception as exc:
-        return jsonify({'ok': False, 'error': f'Could not read Logininfo: {exc}'}), 500
+        return jsonify({'ok': False, 'error': f'Could not read saved ShedSuite accounts: {exc}'}), 500
     lookup = {x.casefold(): x for x in available}
     if email.casefold() not in lookup:
-        return jsonify({'ok': False, 'error': 'Choose a ShedSuite login that exists in Logininfo.'}), 400
+        return jsonify({'ok': False, 'error': 'Choose a ShedSuite login that exists in ShedSuite Accounts.'}), 400
     email = lookup[email.casefold()]
     if not save_shedsuite_login_mapping(company, dealer, email):
         return jsonify({'ok': False, 'error': 'Could not save the company/login mapping.'}), 400
