@@ -13,13 +13,6 @@ import requests
 from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
 
 try:
-    from company_vault import resolve_company_config, dynamic_model_series, dynamic_model_padding
-except Exception:  # keep transform usable if the optional vault module is unavailable
-    resolve_company_config = lambda company, dealer='': None
-    dynamic_model_series = lambda: {}
-    dynamic_model_padding = lambda profile: 0
-
-try:
     import pyodbc  # type: ignore
 except Exception:
     pyodbc = None
@@ -44,16 +37,6 @@ MODEL_SERIES = {
     'MAG_NC': ('0801-', 330, 398, False),
     'MAG_TN': ('0801-', 401, 499, False),
 }
-
-def all_model_series() -> dict[str, tuple[str, int, int, bool]]:
-    """Built-in model series plus any custom series saved in the encrypted Company Manager."""
-    merged = dict(MODEL_SERIES)
-    try:
-        merged.update(dynamic_model_series() or {})
-    except Exception:
-        pass
-    return merged
-
 
 # selectLogIn() + Defaults!D2 logic from the original workbook.
 COMPANY_RULES = {
@@ -362,30 +345,7 @@ def company_rule(src: dict[str, str]) -> dict[str, str]:
                 'store': '12', 'zone_selector': '',
             }
 
-    company_raw = clean_text(src.get('Company Name'))
-    dealer_raw = clean_text(src.get('Dealer'))
-    try:
-        saved = resolve_company_config(company_raw, dealer_raw)
-    except Exception:
-        saved = None
-    if saved:
-        store = clean_text(saved.get('store'))
-        zone = clean_text(saved.get('zone'))
-        model_profile = clean_text(saved.get('model_profile'))
-        if model_profile not in all_model_series():
-            model_profile = clean_text(saved.get('dynamic_profile'))
-        account_email = clean_text(saved.get('account_email'))
-        return {
-            'profile': model_profile,
-            'login': account_email,
-            'store_title': (f"{store} {clean_text(saved.get('name'))}".strip() if store else clean_text(saved.get('name'))),
-            'store': store,
-            'zone_selector': '',
-            'zone': zone,
-            '_vault_company_id': clean_text(saved.get('id')),
-        }
-
-    company = company_raw.casefold()
+    company = clean_text(src.get('Company Name')).casefold()
     company_compact = re.sub(r'[^a-z0-9]+', '', company)
     # V7.20.2: tolerate legal/entity/name variations for the newly onboarded
     # Crestwood tenant instead of requiring one exact Company Name string.
@@ -401,7 +361,7 @@ def company_rule(src: dict[str, str]) -> dict[str, str]:
         return {'profile': '', 'login': '', 'store_title': '', 'store': '', 'zone_selector': 'Set Manually'}
     if rule.get('profile_by_state'):
         st = clean_text(src.get('Physical Destination State')).upper()
-        profile = f'MAG_{st}' if f'MAG_{st}' in all_model_series() else 'MAG_GA'
+        profile = f'MAG_{st}' if f'MAG_{st}' in MODEL_SERIES else 'MAG_GA'
         rule['profile'] = profile
     return rule
 
@@ -409,7 +369,7 @@ def company_rule(src: dict[str, str]) -> dict[str, str]:
 def build_next_model_suggestions(ref: ReferenceData) -> dict[str, str]:
     used = [clean_text(x.get('model')) for x in ref.existing_serials]
     result: dict[str, str] = {}
-    for profile, (prefix, lo, hi, pad3) in all_model_series().items():
+    for profile, (prefix, lo, hi, pad3) in MODEL_SERIES.items():
         vals = []
         for m in used:
             if not m.startswith(prefix):
@@ -419,13 +379,7 @@ def build_next_model_suggestions(ref: ReferenceData) -> dict[str, str]:
                 vals.append(int(tail))
         # Workbook's formulas seed with the lower bound and then +1.
         n = max(vals + [lo]) + 1
-        pad_width = 3 if pad3 else 0
-        try:
-            pad_width = max(pad_width, int(dynamic_model_padding(profile) or 0))
-        except Exception:
-            pass
-        suffix = str(n).zfill(pad_width) if pad_width else str(n)
-        result[profile] = prefix + suffix
+        result[profile] = prefix + (f'{n:03d}' if pad3 else str(n))
     return result
 
 
@@ -819,12 +773,6 @@ def normalized_brand(company: Any) -> str:
     c = clean_text(company)
     if not c:
         return ''
-    try:
-        saved = resolve_company_config(c, '')
-    except Exception:
-        saved = None
-    if saved and clean_text(saved.get('brand')):
-        return clean_text(saved.get('brand')).upper()
 
     # Compacting makes punctuation, spaces and legal suffixes irrelevant:
     #   "Genesis Buildings, LLC" -> "genesisbuildingsllc"
@@ -841,19 +789,6 @@ def normalized_brand(company: Any) -> str:
     # Preserve the old behavior for an unknown manufacturer rather than
     # blanking or guessing it.
     return c.upper()
-
-
-def normalized_vendor(company: Any) -> str:
-    c = clean_text(company)
-    if not c:
-        return ''
-    try:
-        saved = resolve_company_config(c, '')
-    except Exception:
-        saved = None
-    if saved and clean_text(saved.get('vendor')):
-        return clean_text(saved.get('vendor')).upper()
-    return normalized_brand(c)
 
 
 def sac_date(src: dict[str, str], login: str) -> str:
@@ -941,7 +876,6 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
         reserve = parse_money(src.get('Purchase Reserve'))
         amount_paid = initial - delivery_fee - sec - reserve
         brand = normalized_brand(src.get('Company Name'))
-        vendor = normalized_vendor(src.get('Company Name'))
 
         r: dict[str, str] = {h: '' for h in RTO_HEADERS}
         r.update({
@@ -1001,7 +935,7 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
             'DESCRIPTION1': full_description(src),
             'RATE1': numstr(parse_money(src.get('Monthly Subtotal')) - parse_money(src.get('Loss Damage Waiver Monthly Charge'))),
             'BRAND1': brand,
-            'VENDOR1': vendor,
+            'VENDOR1': brand,
             'COST1': numstr(src.get('Building Cost')) if parse_money(src.get('Building Cost')) else '',
             'AGENT1': agent,
             'CATEGORY1': category_for(src, categories),

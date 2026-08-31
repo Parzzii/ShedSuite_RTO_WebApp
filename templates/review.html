@@ -16,10 +16,8 @@
         {% if input_summary and input_summary.file_count %}<span class="db-pill good">{{input_summary.file_count}} file{{'' if input_summary.file_count == 1 else 's'}} merged{% if input_summary.csv_count %} · {{input_summary.csv_count}} CSV{{'' if input_summary.csv_count == 1 else 's'}}{% endif %}{% if input_summary.pdf_count %} · {{input_summary.pdf_count}} PDF{{'' if input_summary.pdf_count == 1 else 's'}}{% endif %}{% if input_summary.duplicates_skipped %} · {{input_summary.duplicates_skipped}} duplicate{{'' if input_summary.duplicates_skipped == 1 else 's'}} skipped{% endif %}</span>{% endif %}
         <span class="db-pill {{'good' if refs.connected else 'bad'}}">Firebird {{'connected' if refs.connected else 'not connected'}}</span>
         {% if learning_stats and learning_stats.total %}<span class="db-pill good" title="Saved locally and reused on future imports">Learning {{learning_stats.total}} rule{{'' if learning_stats.total == 1 else 's'}}</span>{% endif %}
-        <span class="db-pill vault-pill {{ 'open' if vault.unlocked else 'locked' }}">Vault {{ 'unlocked' if vault.unlocked else 'locked' }}</span>
       </div>
       <div class="sticky-actions">
-        <a class="button ghost" href="{{ url_for('company_manager', job=job) }}">Company Manager</a>
         <button type="button" class="secondary" id="validateBtn">Validate rows</button>
         <button type="button" class="primary" id="saveTopBtn">Save all edits</button>
         <a class="button ghost" href="{{ url_for('download', job=job, kind='csv') }}">RTOProImport.csv</a>

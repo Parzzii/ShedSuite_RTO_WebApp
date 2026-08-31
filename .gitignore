@@ -15,7 +15,3 @@ __pycache__/
 # OS/editor files
 .DS_Store
 Thumbs.db
-
-# V7.25 encrypted credential vault / browser sessions
-*.enc
-auth_state/

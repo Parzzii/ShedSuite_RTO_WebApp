@@ -8,13 +8,10 @@ import tempfile
 from pathlib import Path
 
 import fitz
+from openpyxl import load_workbook
 from playwright.async_api import async_playwright, expect
 
 from pdf_tools import bytes_to_pdf, safe_filename
-from company_vault import (
-    vault_unlocked, all_account_credentials, credentials_for_company, account_by_email,
-    account_storage_state, save_account_storage_state,
-)
 
 BASE_URL = 'https://app.shedsuite.com/rto/order/'
 HOME_URL = 'https://app.shedsuite.com/'
@@ -24,9 +21,142 @@ def _safe_email(email: str) -> str:
     return re.sub(r'[^a-zA-Z0-9._-]', '_', (email or '').strip().lower())
 
 
-def _vault_logins() -> list[tuple[str, str]]:
-    """Return ShedSuite credentials from the unlocked encrypted vault only."""
-    return [(email, password) for _aid, email, password in all_account_credentials()]
+def _candidate_legacy_workbooks(base: Path) -> list[Path]:
+    """Return every nearby Contract_Import.xlsm in deterministic priority order.
+
+    V7.20.1 stopped at the first workbook it found.  Users often have several
+    historical ShedSuite app folders, so the newly-added login could live in a
+    different copy.  V7.20.2 merges Logininfo across all nearby workbooks.
+    """
+    explicit = os.getenv('LEGACY_XLSM_PATH', '').strip()
+    home = Path(os.environ.get('USERPROFILE') or Path.home())
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
+
+    fixed_roots = [base, base.parent, home / 'Downloads', home / 'Desktop', home / 'Documents']
+    for root in fixed_roots:
+        candidates += [
+            root / 'Contract_Import.xlsm',
+            root / 'Shedsuite_Import V1.1.7.6' / 'Contract_Import.xlsm',
+            root / 'Shedsuite_Import V1.1.7.6' / 'Shedsuite_Import V1.1.7.6' / 'Contract_Import.xlsm',
+        ]
+
+    # Bounded search; gather all results rather than returning the first one.
+    search_roots = [base.parent, base.parent.parent, home / 'Downloads', home / 'Desktop', home / 'Documents']
+    seen_roots = set()
+    for root in search_roots:
+        try:
+            root = root.resolve()
+        except Exception:
+            continue
+        if root in seen_roots or not root.exists():
+            continue
+        seen_roots.add(root)
+        try:
+            root_depth = len(root.parts)
+            for current, dirs, files in os.walk(root):
+                current_path = Path(current)
+                depth = len(current_path.parts) - root_depth
+                if depth >= 4:
+                    dirs[:] = []
+                if 'Contract_Import.xlsm' in files:
+                    candidates.append(current_path / 'Contract_Import.xlsm')
+        except Exception:
+            pass
+
+    result: list[Path] = []
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            key = str(resolved).casefold()
+            if key in seen or not resolved.exists() or not resolved.is_file():
+                continue
+            seen.add(key)
+            result.append(resolved)
+        except Exception:
+            continue
+    return result
+
+
+def _find_legacy_workbook(base: Path) -> Path | None:
+    books = _candidate_legacy_workbooks(base)
+    return books[0] if books else None
+
+
+def _legacy_logins(base: Path) -> tuple[list[tuple[str, str]], Path | None, str]:
+    """Merge Logininfo credentials from every nearby legacy workbook.
+
+    First occurrence wins for duplicate email addresses, so an explicit
+    LEGACY_XLSM_PATH / workbook beside the current app has highest priority.
+    Passwords remain local and are held only in memory.
+    """
+    books = _candidate_legacy_workbooks(base)
+    if not books:
+        return [], None, ''
+
+    merged: list[tuple[str, str]] = []
+    seen_emails: set[str] = set()
+    selected = ''
+    primary_book: Path | None = None
+
+    for book in books:
+        try:
+            wb = load_workbook(book, data_only=True, read_only=False, keep_vba=True)
+        except Exception:
+            continue
+        try:
+            if primary_book is None:
+                primary_book = book
+            if not selected and 'Import Tools' in wb.sheetnames:
+                selected = str(wb['Import Tools']['D4'].value or '').strip()
+            if 'RTOPro Data' not in wb.sheetnames:
+                continue
+            ws = wb['RTOPro Data']
+            table = ws.tables.get('Logininfo')
+            if not table:
+                continue
+            rows = list(ws[table.ref])
+            for row in rows[1:]:
+                email = str(row[0].value or '').strip()
+                password = str(row[1].value or '')
+                key = email.casefold()
+                if email and password and key not in seen_emails:
+                    seen_emails.add(key)
+                    merged.append((email, password))
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+    if selected:
+        merged.sort(key=lambda x: 0 if x[0].lower() == selected.lower() else 1)
+    return merged, primary_book, selected
+
+def _preferred_login(company: str, dealer: str) -> list[str]:
+    """Same company/login selection idea used by the old Excel macro."""
+    text = f'{company} {dealer}'.lower()
+    if 'crestwood storage barns' in text or 'crestwood' in text:
+        return ['info@whiteriverrto.com']
+    if 'smart shed' in text or 'magnolia' in text:
+        return ['office@magnoliarto.com']
+    if 'lonestar' in text or re.search(r'\blsr\b', text):
+        return ['lsrbarns@gmail.com']
+    if 'westwood' in text or re.search(r'\bwwp\b', text):
+        return ['office@westwoodpayments.com']
+    if '4 seasons' in text or 'four seasons' in text:
+        return ['conrad.s+wv@evergreenrto.com']
+    if 'phoenix' in text and ('dbm' in text or 'dutch' in text):
+        return ['conrad.s+dbm@evergreenrto.com']
+    if 'yoder storage' in text or 'yss' in text:
+        return ['conrad.s+ysb@evergreenrto.com', 'joy.f+davis@evergreenrto.com']
+    if 'alpine' in text:
+        return ['tori.h@evergreenrto.com', 'rentabarn2@gmail.com']
+    if 'genesis' in text:
+        return ['conrad.s@evergreenrto.com']
+    return []
 
 
 def _unwrap_url(url: str) -> str:
@@ -73,9 +203,12 @@ async def _page_blob_bytes(page) -> bytes | None:
         return None
 
 
-async def _login_context(browser, email: str, password: str, base: Path):
-    """Open ShedSuite using credentials from the unlocked encrypted vault."""
-    auth = account_storage_state(email)
+async def _login_context(browser, email: str, password: str, base: Path, legacy_book: Path | None):
+    """Open ShedSuite without prompting; auto-login from old Excel if needed."""
+    local_auth = base / 'auth_state' / f'shedsuite_auth_{_safe_email(email)}.json'
+    local_auth.parent.mkdir(parents=True, exist_ok=True)
+    legacy_auth = legacy_book.parent / 'auth_state' / local_auth.name if legacy_book else None
+    auth = local_auth if local_auth.exists() else (legacy_auth if legacy_auth and legacy_auth.exists() else None)
 
     kwargs = {
         'viewport': {'width': 1100, 'height': 850},
@@ -109,7 +242,7 @@ async def _login_context(browser, email: str, password: str, base: Path):
             needs_login = False
 
     if needs_login:
-        # No prompt: credentials were already unlocked from the encrypted local vault.
+        # No prompt: this is exactly why we read the old workbook's Logininfo.
         try:
             await email_box.fill(email)
         except Exception:
@@ -128,10 +261,7 @@ async def _login_context(browser, email: str, password: str, base: Path):
             # ShedSuite occasionally lands on another authenticated app route.
             # A successful disappearance of the login fields is sufficient.
             await page.wait_for_timeout(2500)
-        try:
-            save_account_storage_state(email, await context.storage_state())
-        except Exception:
-            pass
+        await context.storage_state(path=str(local_auth))
 
     return context, page
 
@@ -427,7 +557,7 @@ async def _run(
     asyncio lock keeps that page serial, while different company logins can run
     concurrently (default: 3 accounts at once).
     """
-    logins = _vault_logins()
+    logins, legacy_book, _selected = _legacy_logins(base)
     if prefetch_cache_dir:
         prefetch_cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -442,26 +572,21 @@ async def _run(
             await asyncio.sleep(0.25)
         return packet_ready_flag.exists()
 
-    if not vault_unlocked():
-        msg = 'Delivery Certificate: encrypted ShedSuite vault is locked. Unlock it in Company Manager and retry.'
-        for row in rows:
-            oid = str(row.get('_source_order_id', '')).strip()
-            if oid:
-                row['_delivery_certificate'] = 'Missing'
-                row['_delivery_certificate_method'] = ''
-                if progress:
-                    progress(oid, 'missing', 'ShedSuite vault is locked. Open Company Manager, unlock it, then Retry.', row)
-        await wait_for_packet_ready()
-        return [msg]
     if not logins:
-        msg = 'Delivery Certificate: no ShedSuite accounts are saved in the encrypted vault.'
+        msg = (
+            'Delivery Certificate: V7 could not find Contract_Import.xlsm / Logininfo. '
+            'Put the old Contract_Import.xlsm beside V7 or set LEGACY_XLSM_PATH. '
+            'V7 intentionally never asks for a ShedSuite password.'
+        )
         for row in rows:
             oid = str(row.get('_source_order_id', '')).strip()
             if oid:
                 row['_delivery_certificate'] = 'Missing'
                 row['_delivery_certificate_method'] = ''
                 if progress:
-                    progress(oid, 'missing', 'No ShedSuite account is saved. Add one in Company Manager.', row)
+                    progress(oid, 'missing', 'Logininfo credentials were not found.', row)
+        # In prefetch mode, do not let the app merge/rebuild while /process is
+        # still constructing the base packets.
         await wait_for_packet_ready()
         return [msg]
 
@@ -491,23 +616,33 @@ async def _run(
         semaphore = asyncio.Semaphore(concurrency)
         pending_prefetch: dict[str, tuple[dict, Path, str, str]] = {}
 
-        def ordered_logins_for(row: dict) -> tuple[list[tuple[str, str]], str]:
+        def ordered_logins_for(row: dict) -> list[tuple[str, str]]:
             oid = str(row.get('_source_order_id', '')).strip()
             src = src_by_order.get(oid, {})
-            company = str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip()
-            dealer = str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip()
-            explicit = str(row.get('_login') or '').strip()
-            email, password, reason = credentials_for_company(company, dealer, explicit)
-            if email and password:
-                return [(email, password)], reason
-            if explicit and not password:
-                return [], f'Credential {explicit} is not saved in the encrypted vault.'
-            return [], 'No ShedSuite account is linked to this company. Open Company Manager and link one.'
+            v3_login = str(row.get('_login') or '').strip()
+            ordered: list[tuple[str, str]] = []
+            if v3_login:
+                item = login_map.get(v3_login.lower())
+                if item:
+                    ordered.append(item)
+                return ordered
+
+            preferred = _preferred_login(
+                src.get('Company Name', '') or row.get('_source_company', ''),
+                src.get('Dealer', '') or row.get('_source_dealer', ''),
+            )
+            for email in preferred:
+                item = login_map.get(email.lower())
+                if item and item not in ordered:
+                    ordered.append(item)
+            if not ordered:
+                ordered.extend(logins)
+            return ordered
 
         async def get_context(email: str, password: str):
             key = email.lower()
             if key not in contexts:
-                contexts[key] = await _login_context(browser, email, password, base)
+                contexts[key] = await _login_context(browser, email, password, base, legacy_book)
             return contexts[key]
 
         async def append_prefetched(row: dict, cache_path: Path, method: str, cert_name: str) -> bool:
@@ -547,19 +682,17 @@ async def _run(
             if should_process and not should_process(oid):
                 return
 
-            ordered, mapping_note = ordered_logins_for(row)
-            if not ordered:
-                if mapping_note == 'delivery certificate disabled':
-                    row['_delivery_certificate'] = 'Skipped'
-                    row['_delivery_certificate_method'] = ''
-                    if progress:
-                        progress(oid, 'skipped', 'Delivery Certificate disabled for this company in Company Manager.', row)
-                    return
-                warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate: {mapping_note}")
+            ordered = ordered_logins_for(row)
+            v3_login = str(row.get('_login') or '').strip()
+            if v3_login and not ordered:
+                warnings.append(
+                    f"{row.get('NAME') or oid}: Delivery Certificate: "
+                    f"V3 selected ShedSuite login {v3_login}, but that login was not found in any nearby Contract_Import.xlsm Logininfo table."
+                )
                 row['_delivery_certificate'] = 'Missing'
                 row['_delivery_certificate_method'] = ''
                 if progress:
-                    progress(oid, 'missing', mapping_note, row)
+                    progress(oid, 'missing', f'Credential {v3_login} was not found in any nearby Contract_Import.xlsm Logininfo table.', row)
                 return
 
             if progress:
@@ -647,7 +780,7 @@ async def _run(
 
             for email_key, (context, _page) in contexts.items():
                 try:
-                    save_account_storage_state(email_key, await context.storage_state())
+                    await context.storage_state(path=str(base / 'auth_state' / f'shedsuite_auth_{_safe_email(email_key)}.json'))
                 except Exception:
                     pass
         finally:
@@ -679,45 +812,3 @@ def append_delivery_certificates(
         prefetch_cache_dir=prefetch_cache_dir, packet_ready_flag=packet_ready_flag,
         concurrency=concurrency,
     ))
-
-
-def test_shedsuite_account(email: str, password: str, base: Path, headless: bool | None = None) -> tuple[bool, str]:
-    """Validate one saved ShedSuite account without exposing the password to the browser UI."""
-    if not email or not password:
-        return False, 'Email or password is blank.'
-
-    async def _test() -> tuple[bool, str]:
-        async with async_playwright() as playwright:
-            use_headless = (os.name != 'nt') if headless is None else bool(headless)
-            launch_kwargs = {'headless': use_headless}
-            if not use_headless:
-                launch_kwargs['args'] = [
-                    '--window-position=-32000,-32000', '--window-size=1100,850',
-                    '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
-                    '--disable-backgrounding-occluded-windows', '--disable-features=CalculateNativeWinOcclusion',
-                ]
-            browser = await playwright.chromium.launch(**launch_kwargs)
-            try:
-                context, page = await _login_context(browser, email, password, base)
-                try:
-                    await page.wait_for_timeout(1200)
-                    url = str(page.url or '').lower()
-                    if '/login' in url:
-                        return False, 'ShedSuite still shows the login page.'
-                    try:
-                        email_box = page.locator('input[type="email"]')
-                        password_box = page.locator('input[type="password"]')
-                        if await email_box.count() and await password_box.count() and await email_box.first.is_visible() and await password_box.first.is_visible():
-                            return False, 'ShedSuite still shows the login fields.'
-                    except Exception:
-                        pass
-                    return True, 'Login succeeded.'
-                finally:
-                    await context.close()
-            finally:
-                await browser.close()
-
-    try:
-        return asyncio.run(_test())
-    except Exception as exc:
-        return False, str(exc)

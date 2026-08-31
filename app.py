@@ -44,18 +44,11 @@ from rto_transform import (
     phone,
     build_next_model_suggestions,
     MODEL_SERIES,
-    all_model_series,
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
-from delivery_certificate import append_delivery_certificates, test_shedsuite_account
+from delivery_certificate import append_delivery_certificates
 from pdf_contract_import import parse_contract_pdf, pdf_epo_percentage
 from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
-from company_vault import (
-    vault_status, vault_exists, vault_unlocked, create_vault, unlock_vault, lock_vault, change_master_password,
-    list_accounts_safe, list_companies_safe, save_account, delete_account, save_company, delete_company,
-    account_by_id, account_by_email, resolve_company_config, import_legacy_logininfo, dynamic_model_series, dynamic_model_padding,
-    clear_account_storage_state,
-)
 
 
 BASE = Path(__file__).resolve().parent
@@ -64,7 +57,8 @@ load_dotenv(BASE / '.env')
 WORK = BASE / 'work' / 'jobs'
 WORK.mkdir(parents=True, exist_ok=True)
 
-AUTH_DIR = BASE / 'auth_state'  # legacy helper only; V7.25 certificate sessions are encrypted in the vault.
+AUTH_DIR = BASE / 'auth_state'
+AUTH_DIR.mkdir(parents=True, exist_ok=True)
 
 SHEDSUITE_BASE_URL = 'https://app.shedsuite.com/rto/order/'
 MODEL_TRACKER_FILE = BASE / 'model_series.json'
@@ -1538,22 +1532,17 @@ def next_model(last_used, prefix):
 
 
 def _format_series_model(profile: str, number: int) -> str:
-    rule = all_model_series().get(profile)
+    rule = MODEL_SERIES.get(profile)
     if not rule:
         return ''
     prefix, _lo, _hi, pad3 = rule
-    width = 3 if pad3 else 0
-    try:
-        width = max(width, int(dynamic_model_padding(profile) or 0))
-    except Exception:
-        pass
-    return prefix + (str(number).zfill(width) if width else str(number))
+    return prefix + (f'{number:03d}' if pad3 else str(number))
 
 
 def inventory_profile_payload(ref: ReferenceData) -> list[dict]:
-    """Build inventory company choices from built-ins plus the unlocked Company Manager."""
+    """Build V7.5 company choices with live inventory-based model suggestions."""
     tracker = load_model_tracker()
-    live_next = build_next_model_suggestions(ref)
+    live_next = build_next_model_suggestions(ref) if ref.connected else {}
     models = [str(x.get('model', '') or '').strip() for x in (ref.existing_serials or [])]
     agents_by_store = {
         str(x.get('store', '') or '').strip(): str(x.get('agent', '') or '').strip()
@@ -1566,30 +1555,12 @@ def inventory_profile_payload(ref: ReferenceData) -> list[dict]:
         for x in stores
     }
 
-    profile_meta = {k: dict(v) for k, v in INVENTORY_PROFILES.items()}
-    if vault_unlocked():
-        for company in list_companies_safe():
-            profile = str(company.get('model_profile', '') or '').strip()
-            custom_prefix = str(company.get('model_prefix', '') or '').strip()
-            if custom_prefix:
-                profile = f"VAULT_{str(company.get('id', '')).upper()}"
-            if not profile or profile not in all_model_series():
-                continue
-            profile_meta[profile] = {
-                'label': str(company.get('name', '') or profile),
-                'brand': str(company.get('brand', '') or company.get('name', '')).upper(),
-                'vendor': str(company.get('vendor', '') or company.get('brand', '') or company.get('name', '')).upper(),
-                'store': str(company.get('store', '') or ''),
-                'tracker': '',
-            }
-
     payload = []
-    for profile, meta in profile_meta.items():
+    for profile, meta in INVENTORY_PROFILES.items():
         latest = ''
         suggested = ''
-        series_map = all_model_series()
-        if profile in series_map:
-            prefix, lo, hi, _pad3 = series_map[profile]
+        if profile in MODEL_SERIES:
+            prefix, lo, hi, _pad3 = MODEL_SERIES[profile]
             vals = []
             for model in models:
                 if not model.startswith(prefix):
@@ -1617,7 +1588,7 @@ def inventory_profile_payload(ref: ReferenceData) -> list[dict]:
             'profile': profile,
             'label': meta.get('label', profile),
             'brand': meta.get('brand', ''),
-            'vendor': meta.get('vendor', meta.get('brand', '')),
+            'vendor': meta.get('brand', ''),
             'store': store,
             'store_title': store_titles.get(store, ''),
             'agent': agents_by_store.get(store, ''),
@@ -3359,236 +3330,8 @@ def index():
     return render_template(
         'index.html',
         dsn=os.getenv('RTO_DSN', 'Firebird DSN'),
-        vault=vault_status(),
     )
 
-
-def _manager_redirect(job: str = ''):
-    return redirect(url_for('company_manager', job=job) if job else url_for('company_manager'))
-
-
-def _clear_shedsuite_auth(email: str) -> None:
-    try:
-        clear_account_storage_state(email)
-    except Exception:
-        pass
-
-
-def _requeue_certificate_after_vault_change(job: str) -> None:
-    job = str(job or '').strip()
-    if not job:
-        return
-    jp = job_path(job)
-    if not (jp / 'rows.json').exists():
-        return
-    ids: set[str] = set()
-    with _job_lock(job):
-        try:
-            rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
-        except Exception:
-            return
-        for row in rows:
-            if str(row.get('_source_type', 'csv') or 'csv').lower() == 'pdf':
-                continue
-            oid = str(row.get('_source_order_id', '') or '').strip()
-            state = str(row.get('_delivery_certificate', '') or '').strip().lower()
-            if oid and state in {'', 'missing', 'queued'}:
-                row['_delivery_certificate'] = 'Queued'
-                ids.add(oid)
-        if ids:
-            temp = (jp / 'rows.json').with_suffix('.tmp')
-            temp.write_text(json.dumps(rows, indent=2), encoding='utf-8')
-            temp.replace(jp / 'rows.json')
-    if ids:
-        _start_certificate_worker(job, only_order_ids=ids, prefetch=False)
-
-
-@app.get('/company-manager')
-def company_manager():
-    job = request.args.get('job', '').strip()
-    status = vault_status()
-    accounts = list_accounts_safe() if status['unlocked'] else []
-    companies = list_companies_safe() if status['unlocked'] else []
-    builtins = []
-    for profile, rule in MODEL_SERIES.items():
-        label = INVENTORY_PROFILES.get(profile, {}).get('label', profile)
-        builtins.append({'profile': profile, 'label': label})
-    return render_template(
-        'company_manager.html',
-        job=job,
-        vault=status,
-        accounts=accounts,
-        companies=companies,
-        model_profiles=builtins,
-        known_stores=KNOWN_STORES,
-    )
-
-
-@app.post('/company-manager/create')
-def company_manager_create():
-    job = request.form.get('job', '').strip()
-    password = request.form.get('master_password', '')
-    confirm = request.form.get('confirm_password', '')
-    if password != confirm:
-        flash('Master passwords do not match.', 'error')
-        return _manager_redirect(job)
-    try:
-        create_vault(password)
-        flash('Encrypted ShedSuite vault created and unlocked.', 'success')
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/unlock')
-def company_manager_unlock():
-    job = request.form.get('job', '').strip()
-    try:
-        unlock_vault(request.form.get('master_password', ''))
-        flash('ShedSuite vault unlocked for this app session.', 'success')
-        _requeue_certificate_after_vault_change(job)
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/lock')
-def company_manager_lock():
-    job = request.form.get('job', '').strip()
-    lock_vault()
-    flash('ShedSuite vault locked.', 'success')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/change-master')
-def company_manager_change_master():
-    job = request.form.get('job', '').strip()
-    password = request.form.get('new_master_password', '')
-    confirm = request.form.get('confirm_password', '')
-    if password != confirm:
-        flash('New master passwords do not match.', 'error')
-        return _manager_redirect(job)
-    try:
-        change_master_password(password)
-        flash('Master password changed. The vault remains unlocked.', 'success')
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/account/save')
-def company_manager_account_save():
-    job = request.form.get('job', '').strip()
-    if not vault_unlocked():
-        flash('Unlock the encrypted vault first.', 'error')
-        return _manager_redirect(job)
-    account_id = request.form.get('account_id', '').strip()
-    email = request.form.get('email', '').strip()
-    try:
-        save_account(account_id, request.form.get('label', ''), email, request.form.get('password', ''))
-        _clear_shedsuite_auth(email)
-        flash(f'Saved ShedSuite account {email}.', 'success')
-        _requeue_certificate_after_vault_change(job)
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/account/delete')
-def company_manager_account_delete():
-    job = request.form.get('job', '').strip()
-    try:
-        account = account_by_id(request.form.get('account_id', ''))
-        if delete_account(request.form.get('account_id', '')):
-            if account:
-                _clear_shedsuite_auth(str(account.get('email', '') or ''))
-            flash('ShedSuite account removed from the encrypted vault.', 'success')
-        else:
-            flash('Account was not found.', 'error')
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/account/test')
-def company_manager_account_test():
-    job = request.form.get('job', '').strip()
-    try:
-        account = account_by_id(request.form.get('account_id', ''), include_password=True)
-        if not account:
-            raise ValueError('Account was not found or the vault is locked.')
-        email = str(account.get('email', '') or '')
-        _clear_shedsuite_auth(email)
-        ok, note = test_shedsuite_account(email, str(account.get('password', '') or ''), BASE)
-        flash((f'{email}: ' + note), 'success' if ok else 'error')
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/company/save')
-def company_manager_company_save():
-    job = request.form.get('job', '').strip()
-    if not vault_unlocked():
-        flash('Unlock the encrypted vault first.', 'error')
-        return _manager_redirect(job)
-    try:
-        save_company(
-            request.form.get('company_id', ''),
-            request.form.get('name', ''),
-            request.form.get('aliases', ''),
-            request.form.get('store', ''),
-            request.form.get('zone', ''),
-            request.form.get('brand', ''),
-            request.form.get('vendor', ''),
-            request.form.get('account_id', ''),
-            request.form.get('model_profile', ''),
-            request.form.get('model_prefix', ''),
-            request.form.get('model_min', ''),
-            request.form.get('model_max', ''),
-            request.form.get('model_pad_width', ''),
-            request.form.get('delivery_certificate') == 'yes',
-        )
-        flash('Company mapping saved. Future imports can use it without a code update.', 'success')
-        _requeue_certificate_after_vault_change(job)
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/company/delete')
-def company_manager_company_delete():
-    job = request.form.get('job', '').strip()
-    try:
-        if delete_company(request.form.get('company_id', '')):
-            flash('Company mapping removed.', 'success')
-        else:
-            flash('Company mapping was not found.', 'error')
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
-
-
-@app.post('/company-manager/import-legacy')
-def company_manager_import_legacy():
-    job = request.form.get('job', '').strip()
-    if not vault_unlocked():
-        flash('Unlock the encrypted vault first.', 'error')
-        return _manager_redirect(job)
-    try:
-        result = import_legacy_logininfo(BASE)
-        if result['imported']:
-            flash(f"Imported {result['imported']} ShedSuite credential row(s) into the encrypted vault. Contract_Import.xlsm is no longer needed for normal downloads.", 'success')
-            _requeue_certificate_after_vault_change(job)
-        elif result['books']:
-            flash('A Contract_Import.xlsm was found, but no usable Logininfo credentials were found.', 'error')
-        else:
-            flash('No Contract_Import.xlsm was found. Add ShedSuite accounts manually instead.', 'error')
-        for err in result.get('errors', [])[:3]:
-            flash('Legacy import: ' + err, 'error')
-    except Exception as exc:
-        flash(str(exc), 'error')
-    return _manager_redirect(job)
 
 
 @app.post('/inventory/start')
@@ -4180,7 +3923,6 @@ def review(job):
         input_summary=input_summary,
         approved_categories=APPROVED_CATEGORIES,
         learning_stats=correction_learning_stats(),
-        vault=vault_status(),
     )
     return inject_review_panels(page_html, source_rows, rows, job, refs)
 
