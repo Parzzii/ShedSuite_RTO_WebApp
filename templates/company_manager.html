@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
+  <title>Company Manager · ShedSuite → RTO Pro V7.25</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell wide manager-shell">
+    <header class="manager-head">
+      <div>
+        <div class="eyebrow">V7.25 · ENCRYPTED COMPANY REGISTRY</div>
+        <h1>Company Manager</h1>
+        <p class="lede small">Add ShedSuite accounts and company mappings here. Future companies no longer require a Python/code update, and normal Delivery Certificate downloads no longer read <code>Contract_Import.xlsm</code>.</p>
+      </div>
+      <div class="manager-head-actions">
+        {% if job %}<a class="button dark" href="{{ url_for('review', job=job) }}">← Return to review</a>{% else %}<a class="button dark" href="{{ url_for('index') }}">← Home</a>{% endif %}
+      </div>
+    </header>
+
+    {% with messages=get_flashed_messages(with_categories=true) %}
+      {% for cat,msg in messages %}<div class="flash {{ 'ok' if cat == 'success' else cat }}">{{msg}}</div>{% endfor %}
+    {% endwith %}
+
+    <section class="panel vault-summary {{ 'vault-open' if vault.unlocked else 'vault-locked' }}">
+      <div>
+        <div class="eyebrow">CROSS-PLATFORM ENCRYPTED VAULT</div>
+        <h2>{{ 'Unlocked' if vault.unlocked else ('Locked' if vault.exists else 'Not created yet') }}</h2>
+        <p>{% if vault.unlocked %}Credentials are decrypted in memory for this app session. The file on disk remains AES-256-GCM encrypted.{% elif vault.exists %}Enter the master password once after starting the app. It is never saved to disk.{% else %}Create one master password. It protects every ShedSuite password in one encrypted file.{% endif %}</p>
+        <small>Vault file: <code>{{ vault.path }}</code></small>
+      </div>
+      {% if vault.unlocked %}
+      <div class="vault-counts"><strong>{{vault.accounts}}</strong><span>accounts</span><strong>{{vault.companies}}</strong><span>companies</span></div>
+      {% endif %}
+    </section>
+
+    {% if not vault.exists %}
+    <section class="panel manager-unlock-card">
+      <div class="manager-section-head"><div><div class="eyebrow">FIRST-TIME SETUP</div><h2>Create encrypted vault</h2></div></div>
+      <form method="post" action="{{ url_for('company_manager_create') }}" class="manager-grid manager-grid-3">
+        <input type="hidden" name="job" value="{{job}}">
+        <label>Master password<input type="password" name="master_password" minlength="8" autocomplete="new-password" required></label>
+        <label>Confirm password<input type="password" name="confirm_password" minlength="8" autocomplete="new-password" required></label>
+        <button class="primary manager-submit" type="submit">Create &amp; unlock</button>
+      </form>
+      <p class="muted manager-note"><strong>Important:</strong> this master password is not stored anywhere. If it is lost, the encrypted vault cannot be recovered.</p>
+    </section>
+    {% elif not vault.unlocked %}
+    <section class="panel manager-unlock-card">
+      <div class="manager-section-head"><div><div class="eyebrow">ONE UNLOCK PER APP SESSION</div><h2>Unlock ShedSuite accounts</h2></div></div>
+      <form method="post" action="{{ url_for('company_manager_unlock') }}" class="manager-grid manager-grid-2">
+        <input type="hidden" name="job" value="{{job}}">
+        <label>Master password<input type="password" name="master_password" autocomplete="current-password" autofocus required></label>
+        <button class="primary manager-submit" type="submit">Unlock vault</button>
+      </form>
+    </section>
+    {% else %}
+
+    <section class="manager-toolbar">
+      <form method="post" action="{{ url_for('company_manager_lock') }}">
+        <input type="hidden" name="job" value="{{job}}"><button class="secondary" type="submit">Lock vault now</button>
+      </form>
+      <details class="master-change">
+        <summary>Change master password</summary>
+        <form method="post" action="{{ url_for('company_manager_change_master') }}" class="manager-inline-form">
+          <input type="hidden" name="job" value="{{job}}">
+          <input type="password" name="new_master_password" minlength="8" placeholder="New master password" required>
+          <input type="password" name="confirm_password" minlength="8" placeholder="Confirm" required>
+          <button class="secondary" type="submit">Change</button>
+        </form>
+      </details>
+    </section>
+
+    <section class="panel legacy-migrate-panel">
+      <div class="manager-section-head">
+        <div><div class="eyebrow">OPTIONAL ONE-TIME MIGRATION</div><h2>Already have logins in Contract_Import.xlsm?</h2></div>
+        <form method="post" action="{{ url_for('company_manager_import_legacy') }}">
+          <input type="hidden" name="job" value="{{job}}"><button class="secondary" type="submit">Import legacy logins once</button>
+        </form>
+      </div>
+      <p class="muted">This button is only a migration helper. After the credentials are encrypted into V7.25's vault, Delivery Certificate downloads do <strong>not</strong> read the XLSM file anymore.</p>
+    </section>
+
+    <section class="manager-columns">
+      <div class="manager-column">
+        <section class="panel">
+          <div class="manager-section-head"><div><div class="eyebrow">SHEDSUITE ACCOUNTS</div><h2>Add account</h2></div><span class="db-pill good">{{accounts|length}} saved</span></div>
+          <form method="post" action="{{ url_for('company_manager_account_save') }}" class="manager-stack">
+            <input type="hidden" name="job" value="{{job}}"><input type="hidden" name="account_id" value="">
+            <label>Label <span class="optional">e.g. White River</span><input name="label" placeholder="White River"></label>
+            <label>Login email<input type="email" name="email" autocomplete="username" required></label>
+            <label>Password<input type="password" name="password" autocomplete="new-password" required></label>
+            <button class="primary" type="submit">Save account</button>
+          </form>
+        </section>
+
+        <section class="account-vault-list">
+          {% for account in accounts %}
+          <details class="panel manager-record">
+            <summary><span><strong>{{account.label or account.email}}</strong><small>{{account.email}}</small></span><span class="db-pill good">{{ 'Session cached' if account.has_session else 'Password saved' }}</span></summary>
+            <form method="post" action="{{ url_for('company_manager_account_save') }}" class="manager-stack manager-record-form">
+              <input type="hidden" name="job" value="{{job}}"><input type="hidden" name="account_id" value="{{account.id}}">
+              <label>Label<input name="label" value="{{account.label}}"></label>
+              <label>Email<input type="email" name="email" value="{{account.email}}" required></label>
+              <label>New password <span class="optional">leave blank to keep current</span><input type="password" name="password" autocomplete="new-password"></label>
+              <div class="manager-record-actions"><button class="primary" type="submit">Update account</button></div>
+            </form>
+            <div class="manager-record-actions detached-actions">
+              <form method="post" action="{{ url_for('company_manager_account_test') }}"><input type="hidden" name="job" value="{{job}}"><input type="hidden" name="account_id" value="{{account.id}}"><button class="secondary" type="submit">Test login</button></form>
+              <form method="post" action="{{ url_for('company_manager_account_delete') }}" onsubmit="return confirm('Remove this ShedSuite account? Linked companies will keep their mapping but lose the login until you relink them.');"><input type="hidden" name="job" value="{{job}}"><input type="hidden" name="account_id" value="{{account.id}}"><button class="danger-button" type="submit">Remove</button></form>
+            </div>
+          </details>
+          {% else %}
+          <div class="panel manager-empty"><strong>No ShedSuite accounts yet.</strong><span>Add an account above or import your old Logininfo table once.</span></div>
+          {% endfor %}
+        </section>
+      </div>
+
+      <div class="manager-column manager-company-column">
+        <section class="panel">
+          <div class="manager-section-head"><div><div class="eyebrow">COMPANY REGISTRY</div><h2>Add company</h2></div><span class="db-pill good">{{companies|length}} custom</span></div>
+          <form method="post" action="{{ url_for('company_manager_company_save') }}" class="manager-stack company-form">
+            <input type="hidden" name="job" value="{{job}}"><input type="hidden" name="company_id" value="">
+            <div class="manager-grid manager-grid-2">
+              <label>Company / manufacturer name<input name="name" placeholder="Crestwood Storage Barns" required></label>
+              <label>Aliases <span class="optional">comma or new line separated</span><input name="aliases" placeholder="Crestwood, Crestwood Storage Barns LLC"></label>
+              <label>Store #<input name="store" inputmode="numeric" placeholder="13"></label>
+              <label>Zone<input name="zone" placeholder="1301"></label>
+              <label>Brand<input name="brand" placeholder="CRESTWOOD"></label>
+              <label>Vendor<input name="vendor" placeholder="CRESTWOOD"></label>
+            </div>
+            <label>ShedSuite account
+              <select name="account_id"><option value="">No Delivery Certificate account</option>{% for a in accounts %}<option value="{{a.id}}">{{a.label or a.email}} · {{a.email}}</option>{% endfor %}</select>
+            </label>
+            <label class="checkbox-card manager-check"><input type="checkbox" name="delivery_certificate" value="yes" checked><span><strong>Download Delivery Certificates</strong><small>Use the linked account directly; V7.25 never cycles through unrelated tenants.</small></span></label>
+            <fieldset class="model-config-fieldset">
+              <legend>Model numbering <span class="optional">optional</span></legend>
+              <label>Reuse an existing series
+                <select name="model_profile"><option value="">None / custom below</option>{% for p in model_profiles %}<option value="{{p.profile}}">{{p.label}} ({{p.profile}})</option>{% endfor %}</select>
+              </label>
+              <div class="manager-grid manager-grid-4">
+                <label>Custom prefix<input name="model_prefix" placeholder="13"></label>
+                <label>Minimum<input name="model_min" inputmode="numeric" placeholder="500"></label>
+                <label>Maximum<input name="model_max" inputmode="numeric" placeholder="9999"></label>
+                <label>Zero-pad width<input name="model_pad_width" inputmode="numeric" placeholder="0"></label>
+              </div>
+              <small>Example: prefix <code>13</code>, min <code>500</code>, max <code>9999</code> creates <code>13-501</code>, <code>13-502</code>… automatically.</small>
+            </fieldset>
+            <button class="primary" type="submit">Save company</button>
+          </form>
+        </section>
+
+        <section class="company-registry-list">
+          {% for company in companies %}
+          <details class="panel manager-record company-record">
+            <summary>
+              <span><strong>{{company.name}}</strong><small>Store {{company.store or '—'}} · Zone {{company.zone or '—'}}{% if company.account_email %} · {{company.account_email}}{% endif %}</small></span>
+              <span class="db-pill {{'good' if company.account_email else 'bad'}}">{{'Linked' if company.account_email else 'No login'}}</span>
+            </summary>
+            <form method="post" action="{{ url_for('company_manager_company_save') }}" class="manager-stack manager-record-form company-form">
+              <input type="hidden" name="job" value="{{job}}"><input type="hidden" name="company_id" value="{{company.id}}">
+              <div class="manager-grid manager-grid-2">
+                <label>Company name<input name="name" value="{{company.name}}" required></label>
+                <label>Aliases<input name="aliases" value="{{company.aliases|join(', ')}}"></label>
+                <label>Store #<input name="store" value="{{company.store}}"></label>
+                <label>Zone<input name="zone" value="{{company.zone}}"></label>
+                <label>Brand<input name="brand" value="{{company.brand}}"></label>
+                <label>Vendor<input name="vendor" value="{{company.vendor}}"></label>
+              </div>
+              <label>ShedSuite account<select name="account_id"><option value="">No account</option>{% for a in accounts %}<option value="{{a.id}}" {{'selected' if a.id == company.account_id else ''}}>{{a.label or a.email}} · {{a.email}}</option>{% endfor %}</select></label>
+              <label class="checkbox-card manager-check"><input type="checkbox" name="delivery_certificate" value="yes" {{'checked' if company.delivery_certificate is not false else ''}}><span><strong>Download Delivery Certificates</strong></span></label>
+              <fieldset class="model-config-fieldset"><legend>Model numbering</legend>
+                <label>Existing series<select name="model_profile"><option value="">None / custom</option>{% for p in model_profiles %}<option value="{{p.profile}}" {{'selected' if p.profile == company.model_profile else ''}}>{{p.label}} ({{p.profile}})</option>{% endfor %}</select></label>
+                <div class="manager-grid manager-grid-4">
+                  <label>Custom prefix<input name="model_prefix" value="{{company.model_prefix or ''}}"></label>
+                  <label>Minimum<input name="model_min" value="{{company.model_min if company.model_min is not none else ''}}"></label>
+                  <label>Maximum<input name="model_max" value="{{company.model_max if company.model_max is not none else ''}}"></label>
+                  <label>Zero-pad width<input name="model_pad_width" value="{{company.model_pad_width or ''}}"></label>
+                </div>
+              </fieldset>
+              <button class="primary" type="submit">Update company</button>
+            </form>
+            <form method="post" action="{{ url_for('company_manager_company_delete') }}" class="detached-actions" onsubmit="return confirm('Remove this custom company mapping? Built-in V7.20 company rules, if any, will become the fallback again.');"><input type="hidden" name="job" value="{{job}}"><input type="hidden" name="company_id" value="{{company.id}}"><button class="danger-button" type="submit">Remove company mapping</button></form>
+          </details>
+          {% else %}
+          <div class="panel manager-empty"><strong>No custom company mappings yet.</strong><span>Your existing V7.20 companies still use their built-in mapping. Add only new companies or overrides here.</span></div>
+          {% endfor %}
+        </section>
+      </div>
+    </section>
+    {% endif %}
+  </main>
+  <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</body>
+</html>
