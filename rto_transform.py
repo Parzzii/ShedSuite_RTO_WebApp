@@ -346,7 +346,17 @@ def company_rule(src: dict[str, str]) -> dict[str, str]:
             }
 
     company = clean_text(src.get('Company Name')).casefold()
-    rule = dict(COMPANY_RULES.get(company, {}))
+    company_compact = re.sub(r'[^a-z0-9]+', '', company)
+    # V7.20.2: tolerate legal/entity/name variations for the newly onboarded
+    # Crestwood tenant instead of requiring one exact Company Name string.
+    if 'crestwood' in company_compact and ('storage' in company_compact or 'barn' in company_compact):
+        rule = {
+            'profile': '', 'login': 'info@whiteriverrto.com',
+            'store_title': '13 Crestwood', 'store': '13',
+            'zone_selector': 'Crestwood Storage Barns, 1301', 'zone': '1301',
+        }
+    else:
+        rule = dict(COMPANY_RULES.get(company, {}))
     if not rule:
         return {'profile': '', 'login': '', 'store_title': '', 'store': '', 'zone_selector': 'Set Manually'}
     if rule.get('profile_by_state'):

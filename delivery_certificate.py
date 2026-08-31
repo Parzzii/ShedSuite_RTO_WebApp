@@ -21,21 +21,20 @@ def _safe_email(email: str) -> str:
     return re.sub(r'[^a-zA-Z0-9._-]', '_', (email or '').strip().lower())
 
 
-def _find_legacy_workbook(base: Path) -> Path | None:
-    """Find the old workbook that already contains the Logininfo table.
+def _candidate_legacy_workbooks(base: Path) -> list[Path]:
+    """Return every nearby Contract_Import.xlsm in deterministic priority order.
 
-    V5 intentionally does NOT ask for a ShedSuite password. It reuses the same
-    credentials source as Contract_Import.xlsm / Contract_Import.py.
+    V7.20.1 stopped at the first workbook it found.  Users often have several
+    historical ShedSuite app folders, so the newly-added login could live in a
+    different copy.  V7.20.2 merges Logininfo across all nearby workbooks.
     """
     explicit = os.getenv('LEGACY_XLSM_PATH', '').strip()
+    home = Path(os.environ.get('USERPROFILE') or Path.home())
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit))
 
-    fixed_roots = [base, base.parent]
-    home = Path(os.environ.get('USERPROFILE') or Path.home())
-    fixed_roots += [home / 'Downloads', home / 'Desktop', home / 'Documents']
-
+    fixed_roots = [base, base.parent, home / 'Downloads', home / 'Desktop', home / 'Documents']
     for root in fixed_roots:
         candidates += [
             root / 'Contract_Import.xlsm',
@@ -43,17 +42,7 @@ def _find_legacy_workbook(base: Path) -> Path | None:
             root / 'Shedsuite_Import V1.1.7.6' / 'Shedsuite_Import V1.1.7.6' / 'Contract_Import.xlsm',
         ]
 
-    for p in candidates:
-        try:
-            if p.exists() and p.is_file():
-                return p.resolve()
-        except Exception:
-            pass
-
-    # Last-resort bounded search of the normal user folders and the current
-    # app's parent tree. New V7 builds are often extracted into another nested
-    # version folder, while Contract_Import.xlsm remains beside an older build.
-    # Search several levels without ever scanning the whole drive.
+    # Bounded search; gather all results rather than returning the first one.
     search_roots = [base.parent, base.parent.parent, home / 'Downloads', home / 'Desktop', home / 'Documents']
     seen_roots = set()
     for root in search_roots:
@@ -69,45 +58,82 @@ def _find_legacy_workbook(base: Path) -> Path | None:
             for current, dirs, files in os.walk(root):
                 current_path = Path(current)
                 depth = len(current_path.parts) - root_depth
-                # Four nested folders is enough for typical Desktop\shed\version
-                # layouts while avoiding an expensive recursive user-profile scan.
                 if depth >= 4:
                     dirs[:] = []
                 if 'Contract_Import.xlsm' in files:
-                    return (current_path / 'Contract_Import.xlsm').resolve()
+                    candidates.append(current_path / 'Contract_Import.xlsm')
         except Exception:
             pass
-    return None
+
+    result: list[Path] = []
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            key = str(resolved).casefold()
+            if key in seen or not resolved.exists() or not resolved.is_file():
+                continue
+            seen.add(key)
+            result.append(resolved)
+        except Exception:
+            continue
+    return result
+
+
+def _find_legacy_workbook(base: Path) -> Path | None:
+    books = _candidate_legacy_workbooks(base)
+    return books[0] if books else None
 
 
 def _legacy_logins(base: Path) -> tuple[list[tuple[str, str]], Path | None, str]:
-    """Read the exact Excel Logininfo table. Passwords remain local/in-memory."""
-    book = _find_legacy_workbook(base)
-    if not book:
+    """Merge Logininfo credentials from every nearby legacy workbook.
+
+    First occurrence wins for duplicate email addresses, so an explicit
+    LEGACY_XLSM_PATH / workbook beside the current app has highest priority.
+    Passwords remain local and are held only in memory.
+    """
+    books = _candidate_legacy_workbooks(base)
+    if not books:
         return [], None, ''
 
-    wb = load_workbook(book, data_only=True, read_only=False, keep_vba=True)
-    try:
-        selected = str(wb['Import Tools']['D4'].value or '').strip() if 'Import Tools' in wb.sheetnames else ''
-        if 'RTOPro Data' not in wb.sheetnames:
-            return [], book, selected
-        ws = wb['RTOPro Data']
-        table = ws.tables.get('Logininfo')
-        result: list[tuple[str, str]] = []
-        if table:
+    merged: list[tuple[str, str]] = []
+    seen_emails: set[str] = set()
+    selected = ''
+    primary_book: Path | None = None
+
+    for book in books:
+        try:
+            wb = load_workbook(book, data_only=True, read_only=False, keep_vba=True)
+        except Exception:
+            continue
+        try:
+            if primary_book is None:
+                primary_book = book
+            if not selected and 'Import Tools' in wb.sheetnames:
+                selected = str(wb['Import Tools']['D4'].value or '').strip()
+            if 'RTOPro Data' not in wb.sheetnames:
+                continue
+            ws = wb['RTOPro Data']
+            table = ws.tables.get('Logininfo')
+            if not table:
+                continue
             rows = list(ws[table.ref])
             for row in rows[1:]:
                 email = str(row[0].value or '').strip()
                 password = str(row[1].value or '')
-                if email and password:
-                    result.append((email, password))
-    finally:
-        wb.close()
+                key = email.casefold()
+                if email and password and key not in seen_emails:
+                    seen_emails.add(key)
+                    merged.append((email, password))
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
 
     if selected:
-        result.sort(key=lambda x: 0 if x[0].lower() == selected.lower() else 1)
-    return result, book, selected
-
+        merged.sort(key=lambda x: 0 if x[0].lower() == selected.lower() else 1)
+    return merged, primary_book, selected
 
 def _preferred_login(company: str, dealer: str) -> list[str]:
     """Same company/login selection idea used by the old Excel macro."""
@@ -601,7 +627,10 @@ async def _run(
                     ordered.append(item)
                 return ordered
 
-            preferred = _preferred_login(src.get('Company Name', ''), src.get('Dealer', ''))
+            preferred = _preferred_login(
+                src.get('Company Name', '') or row.get('_source_company', ''),
+                src.get('Dealer', '') or row.get('_source_dealer', ''),
+            )
             for email in preferred:
                 item = login_map.get(email.lower())
                 if item and item not in ordered:
@@ -658,12 +687,12 @@ async def _run(
             if v3_login and not ordered:
                 warnings.append(
                     f"{row.get('NAME') or oid}: Delivery Certificate: "
-                    f"V3 selected ShedSuite login {v3_login}, but that login was not found in Logininfo."
+                    f"V3 selected ShedSuite login {v3_login}, but that login was not found in any nearby Contract_Import.xlsm Logininfo table."
                 )
                 row['_delivery_certificate'] = 'Missing'
                 row['_delivery_certificate_method'] = ''
                 if progress:
-                    progress(oid, 'missing', f'Login mapping not found for {v3_login}.', row)
+                    progress(oid, 'missing', f'Credential {v3_login} was not found in any nearby Contract_Import.xlsm Logininfo table.', row)
                 return
 
             if progress:
