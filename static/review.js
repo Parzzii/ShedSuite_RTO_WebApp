@@ -333,7 +333,10 @@
 
   function emailIssue(value) {
     const v=clean(value);
-    if (!v) return 'Email missing';
+    // V7.20.3: a missing email is acceptable and should NOT put the
+    // contract into Needs Review. Only a non-empty but malformed/incomplete
+    // email is actionable.
+    if (!v) return '';
     // Flag obvious partial/broken addresses such as "johnsmith",
     // "john@gmail", "@gmail.com", or values containing spaces.
     // Keep the rule intentionally practical: local@domain.tld.
@@ -372,8 +375,11 @@
     const type=opts.type || 'text';
     if (field==='EMAIL') {
       const issue=emailIssue(val);
-      const help=issue || 'Email format looks valid';
-      return `<label class="field email-field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input type="email" class="email-validation-input ${issue?'email-invalid':'email-valid'}" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="email" aria-invalid="${issue?'true':'false'}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}><small class="email-status ${issue?'bad':'good'}">${esc(help)}</small></label>`;
+      const hasEmail=!!val;
+      const help=issue || (hasEmail ? 'Email format looks valid' : 'No email provided');
+      const stateClass=issue ? 'email-invalid' : (hasEmail ? 'email-valid' : '');
+      const statusClass=issue ? 'bad' : (hasEmail ? 'good' : 'neutral');
+      return `<label class="field email-field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><input type="email" class="email-validation-input ${stateClass}" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="email" aria-invalid="${issue?'true':'false'}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''}><small class="email-status ${statusClass}">${esc(help)}</small></label>`;
     }
     if (field==='CATEGORY1' && approvedCategories.length) {
       return `<label class="field ${opts.wide?'wide-field':''} ${opts.emphasis?'emphasis':''}"><span>${esc(label)}</span><div class="category-combo"><input class="approved-category-input category-combo-input" data-i="${i}" data-field="${field}" value="${esc(val)}" autocomplete="off" placeholder="Type or choose category" aria-autocomplete="list" aria-expanded="false"><div class="category-combo-menu" role="listbox" aria-label="Approved category suggestions"></div></div><small>Type normally, or click the field to open the full approved category list.</small></label>`;
@@ -1068,15 +1074,18 @@
       }
       if (['CELL','REFPHONE1','REFPHONE2','REFERENCE1','REFRELATION1','REFERENCE2','REFRELATION2'].includes(field)) applyPhoneRule(i,false);
       if (field==='EMAIL') {
-        const issue=emailIssue(e.target.value);
+        const value=clean(e.target.value);
+        const issue=emailIssue(value);
+        const hasEmail=!!value;
         e.target.classList.toggle('email-invalid',!!issue);
-        e.target.classList.toggle('email-valid',!issue);
+        e.target.classList.toggle('email-valid',!issue && hasEmail);
         e.target.setAttribute('aria-invalid',issue?'true':'false');
         const helper=e.target.closest('.email-field')?.querySelector('.email-status');
         if (helper) {
-          helper.textContent=issue || 'Email format looks valid';
+          helper.textContent=issue || (hasEmail ? 'Email format looks valid' : 'No email provided');
           helper.classList.toggle('bad',!!issue);
-          helper.classList.toggle('good',!issue);
+          helper.classList.toggle('good',!issue && hasEmail);
+          helper.classList.toggle('neutral',!issue && !hasEmail);
         }
         updateStats();
       }

@@ -1,3 +1,15 @@
+ShedSuite RTO Web App - V7.20.3
+====================================
+
+V7.20.3 - Email review rule refinement
+---------------------------------------
+- Built directly from the stable V7.20.2 codebase.
+- A blank/missing customer email is now allowed and does NOT place the contract in Needs Review.
+- A non-empty but malformed/incomplete email is still flagged as Email invalid and places the contract in Needs Review.
+- Examples flagged: johnsmith, john@gmail, @gmail.com, john@, or values with spaces.
+- Valid addresses such as john@gmail.com remain accepted.
+- No other V7.20.2 behavior was changed.
+
 ShedSuite RTO Web App - V7.20.2
 ====================================
 

@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <script>try{const t=localStorage.getItem('shedsuite-theme');if(t==='dark'||t==='cyberpunk')document.documentElement.dataset.theme=t;}catch(e){}</script>
-  <title>Company Manager · ShedSuite → RTO Pro V7.25</title>
+  <title>Company Manager · ShedSuite → RTO Pro V7.25.1</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <main class="shell wide manager-shell">
     <header class="manager-head">
       <div>
-        <div class="eyebrow">V7.25 · ENCRYPTED COMPANY REGISTRY</div>
+        <div class="eyebrow">V7.25.1 · ENCRYPTED COMPANY REGISTRY</div>
         <h1>Company Manager</h1>
         <p class="lede small">Add ShedSuite accounts and company mappings here. Future companies no longer require a Python/code update, and normal Delivery Certificate downloads no longer read <code>Contract_Import.xlsm</code>.</p>
       </div>
@@ -80,7 +80,7 @@
           <input type="hidden" name="job" value="{{job}}"><button class="secondary" type="submit">Import legacy logins once</button>
         </form>
       </div>
-      <p class="muted">This button is only a migration helper. After the credentials are encrypted into V7.25's vault, Delivery Certificate downloads do <strong>not</strong> read the XLSM file anymore.</p>
+      <p class="muted">This button is only a migration helper. After the credentials are encrypted into V7.25.1's vault, Delivery Certificate downloads do <strong>not</strong> read the XLSM file anymore.</p>
     </section>
 
     <section class="manager-columns">
@@ -134,7 +134,7 @@
             <label>ShedSuite account
               <select name="account_id"><option value="">No Delivery Certificate account</option>{% for a in accounts %}<option value="{{a.id}}">{{a.label or a.email}} · {{a.email}}</option>{% endfor %}</select>
             </label>
-            <label class="checkbox-card manager-check"><input type="checkbox" name="delivery_certificate" value="yes" checked><span><strong>Download Delivery Certificates</strong><small>Use the linked account directly; V7.25 never cycles through unrelated tenants.</small></span></label>
+            <label class="checkbox-card manager-check"><input type="checkbox" name="delivery_certificate" value="yes" checked><span><strong>Download Delivery Certificates</strong><small>Use the linked account directly; V7.25.1 never cycles through unrelated tenants.</small></span></label>
             <fieldset class="model-config-fieldset">
               <legend>Model numbering <span class="optional">optional</span></legend>
               <label>Reuse an existing series

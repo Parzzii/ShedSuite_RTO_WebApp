@@ -280,3 +280,5 @@ html[data-theme="cyberpunk"] .category-combo-empty{color:#c9b8d0}
 html[data-theme="dark"] .email-field input.email-invalid{background:#301b1d!important;border-color:#ff756b!important;color:#fff}
 html[data-theme="cyberpunk"] .email-field input.email-invalid{background:rgba(90,9,29,.42)!important;border-color:#ff3b6b!important;box-shadow:0 0 12px rgba(255,59,107,.45)}
 html[data-theme="cyberpunk"] .email-status.bad{color:#ff6b83!important;text-shadow:0 0 8px rgba(255,59,107,.45)}
+
+.email-status.neutral{color:var(--muted)!important;font-weight:500!important}
