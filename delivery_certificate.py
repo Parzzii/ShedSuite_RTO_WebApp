@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ctypes
-import json
 import os
 import re
 import tempfile
-import threading
 from pathlib import Path
 
 import fitz
@@ -18,340 +15,6 @@ from pdf_tools import bytes_to_pdf, safe_filename
 
 BASE_URL = 'https://app.shedsuite.com/rto/order/'
 HOME_URL = 'https://app.shedsuite.com/'
-
-# V7.22: in-app ShedSuite account vault + persistent company -> login mapping.
-# New companies are automatically probed against saved accounts and the correct
-# tenant is remembered. The legacy Logininfo workbook remains a fallback only.
-_LOGIN_MAPPING_LOCK = threading.RLock()
-_ACCOUNT_STORE_LOCK = threading.RLock()
-
-
-def _account_store_path() -> Path:
-    """Cross-version local account store managed by the web app."""
-    override = str(os.getenv('SHEDSUITE_ACCOUNTS_FILE', '') or '').strip()
-    if override:
-        return Path(override).expanduser()
-    if os.name == 'nt':
-        root = Path(os.getenv('LOCALAPPDATA') or Path.home())
-        return root / 'ShedSuiteRTO' / 'shedsuite_accounts.json'
-    return Path.home() / '.shedsuite_rto' / 'shedsuite_accounts.json'
-
-
-def _dpapi_protect(raw: bytes) -> bytes:
-    """Protect bytes with Windows DPAPI for the current Windows user."""
-    if os.name != 'nt':
-        return raw
-
-    class DATA_BLOB(ctypes.Structure):
-        _fields_ = [('cbData', ctypes.c_ulong), ('pbData', ctypes.POINTER(ctypes.c_ubyte))]
-
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
-    crypt32.CryptProtectData.argtypes = [
-        ctypes.POINTER(DATA_BLOB), ctypes.c_wchar_p, ctypes.POINTER(DATA_BLOB),
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(DATA_BLOB),
-    ]
-    crypt32.CryptProtectData.restype = ctypes.c_bool
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    in_buf = ctypes.create_string_buffer(raw)
-    in_blob = DATA_BLOB(len(raw), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_ubyte)))
-    out_blob = DATA_BLOB()
-    if not crypt32.CryptProtectData(ctypes.byref(in_blob), 'ShedSuiteRTO', None, None, None, 0, ctypes.byref(out_blob)):
-        raise ctypes.WinError()
-    try:
-        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
-    finally:
-        kernel32.LocalFree(out_blob.pbData)
-
-
-def _dpapi_unprotect(raw: bytes) -> bytes:
-    if os.name != 'nt':
-        return raw
-
-    class DATA_BLOB(ctypes.Structure):
-        _fields_ = [('cbData', ctypes.c_ulong), ('pbData', ctypes.POINTER(ctypes.c_ubyte))]
-
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
-    crypt32.CryptUnprotectData.argtypes = [
-        ctypes.POINTER(DATA_BLOB), ctypes.POINTER(ctypes.c_wchar_p), ctypes.POINTER(DATA_BLOB),
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(DATA_BLOB),
-    ]
-    crypt32.CryptUnprotectData.restype = ctypes.c_bool
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    in_buf = ctypes.create_string_buffer(raw)
-    in_blob = DATA_BLOB(len(raw), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_ubyte)))
-    out_blob = DATA_BLOB()
-    if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-        raise ctypes.WinError()
-    try:
-        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
-    finally:
-        kernel32.LocalFree(out_blob.pbData)
-
-
-def _encode_password(password: str) -> str:
-    raw = str(password or '').encode('utf-8')
-    protected = _dpapi_protect(raw)
-    prefix = 'dpapi:' if os.name == 'nt' else 'local:'
-    return prefix + base64.b64encode(protected).decode('ascii')
-
-
-def _decode_password(value: str) -> str:
-    value = str(value or '')
-    if not value:
-        return ''
-    if ':' not in value:
-        return ''
-    prefix, payload = value.split(':', 1)
-    try:
-        raw = base64.b64decode(payload)
-        if prefix == 'dpapi':
-            raw = _dpapi_unprotect(raw)
-        return raw.decode('utf-8')
-    except Exception:
-        return ''
-
-
-def _load_account_store() -> dict:
-    path = _account_store_path()
-    with _ACCOUNT_STORE_LOCK:
-        if not path.exists():
-            return {'version': 1, 'accounts': []}
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            return {'version': 1, 'accounts': []}
-        if not isinstance(data, dict):
-            return {'version': 1, 'accounts': []}
-        if not isinstance(data.get('accounts'), list):
-            data['accounts'] = []
-        return data
-
-
-def _save_account_store(data: dict) -> None:
-    path = _account_store_path()
-    with _ACCOUNT_STORE_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix('.tmp')
-        temp.write_text(json.dumps(data, indent=2), encoding='utf-8')
-        temp.replace(path)
-
-
-def list_shedsuite_accounts(base: Path | None = None, include_legacy: bool = True) -> list[dict]:
-    """Return safe account metadata; passwords are never returned."""
-    data = _load_account_store()
-    result: dict[str, dict] = {}
-    for item in data.get('accounts', []):
-        if not isinstance(item, dict):
-            continue
-        email = str(item.get('email', '') or '').strip()
-        if not email:
-            continue
-        result[email.casefold()] = {
-            'email': email,
-            'source': 'app',
-            'has_password': bool(_decode_password(str(item.get('password', '') or ''))),
-        }
-    if include_legacy and base is not None:
-        try:
-            legacy, _book, _selected = _legacy_logins(base)
-        except Exception:
-            legacy = []
-        for email, password in legacy:
-            key = email.casefold()
-            if key not in result:
-                result[key] = {'email': email, 'source': 'legacy workbook', 'has_password': bool(password)}
-    return sorted(result.values(), key=lambda x: x['email'].casefold())
-
-
-def save_shedsuite_account(email: str, password: str) -> bool:
-    email = str(email or '').strip()
-    password = str(password or '')
-    if not email or '@' not in email or not password:
-        return False
-    data = _load_account_store()
-    accounts = [x for x in data.get('accounts', []) if isinstance(x, dict)]
-    encoded = _encode_password(password)
-    found = False
-    for item in accounts:
-        if str(item.get('email', '') or '').strip().casefold() == email.casefold():
-            item['email'] = email
-            item['password'] = encoded
-            found = True
-            break
-    if not found:
-        accounts.append({'email': email, 'password': encoded})
-    data['accounts'] = accounts
-    data['version'] = 1
-    _save_account_store(data)
-    return True
-
-
-def delete_shedsuite_account(email: str) -> bool:
-    email = str(email or '').strip()
-    if not email:
-        return False
-    data = _load_account_store()
-    old = [x for x in data.get('accounts', []) if isinstance(x, dict)]
-    new = [x for x in old if str(x.get('email', '') or '').strip().casefold() != email.casefold()]
-    if len(new) == len(old):
-        return False
-    data['accounts'] = new
-    _save_account_store(data)
-    remove_shedsuite_login_mappings_for_email(email)
-    return True
-
-
-def _stored_logins() -> list[tuple[str, str]]:
-    data = _load_account_store()
-    result: list[tuple[str, str]] = []
-    for item in data.get('accounts', []):
-        if not isinstance(item, dict):
-            continue
-        email = str(item.get('email', '') or '').strip()
-        password = _decode_password(str(item.get('password', '') or ''))
-        if email and password:
-            result.append((email, password))
-    return result
-
-
-def _all_logins(base: Path) -> tuple[list[tuple[str, str]], Path | None, str]:
-    """Merge in-app accounts with the legacy Logininfo table; in-app wins."""
-    legacy, book, selected = _legacy_logins(base)
-    merged: dict[str, tuple[str, str]] = {email.casefold(): (email, password) for email, password in legacy}
-    for email, password in _stored_logins():
-        merged[email.casefold()] = (email, password)
-    result = list(merged.values())
-    if selected:
-        result.sort(key=lambda x: 0 if x[0].casefold() == selected.casefold() else 1)
-    return result, book, selected
-
-
-def _login_mapping_path() -> Path:
-    override = str(os.getenv('SHEDSUITE_LOGIN_MAPPING_FILE', '') or '').strip()
-    if override:
-        return Path(override).expanduser()
-    if os.name == 'nt':
-        root = Path(os.getenv('LOCALAPPDATA') or Path.home())
-        return root / 'ShedSuiteRTO' / 'shedsuite_login_mappings.json'
-    return Path.home() / '.shedsuite_rto' / 'shedsuite_login_mappings.json'
-
-
-def _login_entity_key(value: str) -> str:
-    text = str(value or '').casefold().replace('&', ' and ')
-    words = re.findall(r'[a-z0-9]+', text)
-    disposable = {
-        'llc', 'inc', 'incorporated', 'corp', 'corporation', 'company', 'co',
-        'limited', 'ltd', 'buildings', 'building', 'enterprises', 'enterprise',
-    }
-    words = [w for w in words if w not in disposable]
-    return ' '.join(words).strip()
-
-
-def shedsuite_login_key(company: str, dealer: str = '') -> str:
-    """Stable company key used for local ShedSuite-login learning."""
-    company_key = _login_entity_key(company)
-    if company_key:
-        return company_key
-    return _login_entity_key(dealer)
-
-
-def _load_login_mappings() -> dict:
-    path = _login_mapping_path()
-    with _LOGIN_MAPPING_LOCK:
-        if not path.exists():
-            return {'version': 1, 'mappings': {}}
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            return {'version': 1, 'mappings': {}}
-        if not isinstance(data, dict):
-            return {'version': 1, 'mappings': {}}
-        if not isinstance(data.get('mappings'), dict):
-            data['mappings'] = {}
-        return data
-
-
-def _save_login_mappings(data: dict) -> None:
-    path = _login_mapping_path()
-    with _LOGIN_MAPPING_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix('.tmp')
-        temp.write_text(json.dumps(data, indent=2), encoding='utf-8')
-        temp.replace(path)
-
-
-def saved_shedsuite_login(company: str, dealer: str = '') -> str:
-    key = shedsuite_login_key(company, dealer)
-    if not key:
-        return ''
-    item = (_load_login_mappings().get('mappings', {}) or {}).get(key, {})
-    return str(item.get('email', '') if isinstance(item, dict) else item or '').strip()
-
-
-def save_shedsuite_login_mapping(company: str, dealer: str, email: str) -> bool:
-    key = shedsuite_login_key(company, dealer)
-    email = str(email or '').strip()
-    if not key or not email:
-        return False
-    data = _load_login_mappings()
-    mappings = data.setdefault('mappings', {})
-    mappings[key] = {
-        'email': email,
-        'company': str(company or '').strip(),
-        'dealer': str(dealer or '').strip(),
-    }
-    data['version'] = 1
-    _save_login_mappings(data)
-    return True
-
-
-def remove_shedsuite_login_mappings_for_email(email: str) -> None:
-    email = str(email or '').strip().casefold()
-    if not email:
-        return
-    data = _load_login_mappings()
-    mappings = data.setdefault('mappings', {})
-    changed = False
-    for key in list(mappings):
-        item = mappings.get(key, {})
-        mapped = str(item.get('email', '') if isinstance(item, dict) else item or '').strip().casefold()
-        if mapped == email:
-            mappings.pop(key, None)
-            changed = True
-    if changed:
-        _save_login_mappings(data)
-
-
-def available_shedsuite_login_emails(base: Path) -> list[str]:
-    """Return all locally available account emails without exposing passwords."""
-    logins, _book, _selected = _all_logins(base)
-    return [email for email, _password in logins]
-
-
-def resolve_shedsuite_login(company: str, dealer: str = '', explicit_login: str = '') -> tuple[str, str]:
-    """Resolve one deterministic login and report why it was chosen.
-
-    This function deliberately never returns an arbitrary fallback login.  If a
-    new company is not mapped, the UI must ask once instead of Chromium trying
-    unrelated tenants for up to two minutes each.
-    """
-    explicit_login = str(explicit_login or '').strip()
-    # A user-confirmed saved mapping is allowed to override an older built-in
-    # company rule. That makes onboarding/fixing a login possible without
-    # editing Python again.
-    learned = saved_shedsuite_login(company, dealer)
-    if learned:
-        return learned, 'saved mapping'
-    if explicit_login:
-        return explicit_login, 'company rule'
-    preferred = _preferred_login(company, dealer)
-    if preferred:
-        return preferred[0], 'built-in mapping'
-    return '', 'mapping needed'
 
 
 def _safe_email(email: str) -> str:
@@ -866,7 +529,7 @@ async def _run(
     asyncio lock keeps that page serial, while different company logins can run
     concurrently (default: 3 accounts at once).
     """
-    logins, legacy_book, _selected = _all_logins(base)
+    logins, legacy_book, _selected = _legacy_logins(base)
     if prefetch_cache_dir:
         prefetch_cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -883,16 +546,17 @@ async def _run(
 
     if not logins:
         msg = (
-            'Delivery Certificate: no ShedSuite accounts are saved. '
-            'Open ShedSuite Accounts in the web app and add at least one login.'
+            'Delivery Certificate: V7 could not find Contract_Import.xlsm / Logininfo. '
+            'Put the old Contract_Import.xlsm beside V7 or set LEGACY_XLSM_PATH. '
+            'V7 intentionally never asks for a ShedSuite password.'
         )
         for row in rows:
             oid = str(row.get('_source_order_id', '')).strip()
             if oid:
-                row['_delivery_certificate'] = 'Login mapping needed'
+                row['_delivery_certificate'] = 'Missing'
                 row['_delivery_certificate_method'] = ''
                 if progress:
-                    progress(oid, 'login_needed', 'No ShedSuite accounts are saved. Add one in ShedSuite Accounts.', row)
+                    progress(oid, 'missing', 'Logininfo credentials were not found.', row)
         # In prefetch mode, do not let the app merge/rebuild while /process is
         # still constructing the base packets.
         await wait_for_packet_ready()
@@ -924,176 +588,25 @@ async def _run(
         semaphore = asyncio.Semaphore(concurrency)
         pending_prefetch: dict[str, tuple[dict, Path, str, str]] = {}
 
-        def login_resolution_for(row: dict) -> tuple[tuple[str, str] | None, str, str, str, str]:
-            """Resolve a known login; unknown companies are auto-discovered."""
+        def ordered_logins_for(row: dict) -> list[tuple[str, str]]:
             oid = str(row.get('_source_order_id', '')).strip()
             src = src_by_order.get(oid, {})
-            company = str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip()
-            dealer = str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip()
-            explicit = str(row.get('_login') or '').strip()
-            email, reason = resolve_shedsuite_login(company, dealer, explicit)
-            if not email:
-                return None, '', reason, company, dealer
-            item = login_map.get(email.lower())
-            if not item:
-                return None, email, 'mapped login is not present in saved accounts', company, dealer
-            return item, email, reason, company, dealer
-
-        discovery_cache: dict[str, str] = {}
-        discovery_locks: dict[str, asyncio.Lock] = {}
-        validated_mapping_cache: dict[str, str] = {}
-
-        async def probe_account_for_order(email: str, password: str, oid: str, row: dict) -> bool:
-            """Determine whether one tenant owns the order without rejecting slow React pages too early.
-
-            V7.22 used a fixed 1.8 second sleep and a few text markers. Some
-            valid orders render their detail/files area later, so the correct
-            tenant could be incorrectly rejected and discovery would continue
-            through every saved login. V7.22.1 polls the actual order route for
-            up to ~12 seconds, watches for negative/positive evidence, and treats
-            a stable exact order URL with a rendered authenticated page as a
-            positive fallback.
-            """
-            key = email.lower()
-            lock = login_locks.setdefault(key, asyncio.Lock())
-            async with lock:
-                context, page = await get_context(email, password)
-                target_url = BASE_URL + str(oid)
-                try:
-                    await page.goto(target_url, wait_until='domcontentloaded', timeout=90000)
-                except Exception:
-                    return False
-
-                # ShedSuite is React-driven. Best-effort network-idle helps when
-                # available, but we do not make discovery depend on it.
-                try:
-                    await page.wait_for_load_state('networkidle', timeout=6000)
-                except Exception:
-                    pass
-
-                name = str(row.get('NAME', '') or '').strip().casefold()
-                last = name.split()[-1] if name else ''
-                oid_cf = str(oid).casefold()
-                negatives = (
-                    'order not found', 'order does not exist', 'does not exist',
-                    'access denied', 'unauthorized', 'forbidden', 'permission denied',
-                )
-                positive_markers = (
-                    'customer information', 'order details', 'contract information',
-                    'files', 'documents', 'delivery information', 'payment information',
-                )
-
-                loop = asyncio.get_running_loop()
-                deadline = loop.time() + 12.0
-                last_body = ''
-                exact_route_seen = False
-
-                while loop.time() < deadline:
-                    try:
-                        current_url = str(page.url or '')
-                    except Exception:
-                        current_url = ''
-                    current_low = current_url.casefold()
-                    if '/login' in current_low:
-                        return False
-
-                    # Exact route is strong evidence, but still allow the page a
-                    # moment to render an explicit Not Found / Access Denied state.
-                    normalized_target = target_url.rstrip('/').casefold()
-                    normalized_current = current_url.split('?', 1)[0].rstrip('/').casefold()
-                    if normalized_current == normalized_target:
-                        exact_route_seen = True
-
-                    try:
-                        body = re.sub(r'\s+', ' ', (await page.locator('body').inner_text()) or '').casefold()
-                    except Exception:
-                        body = ''
-                    if body:
-                        last_body = body
-
-                    if any(x in body for x in negatives):
-                        return False
-                    if oid_cf and oid_cf in body:
-                        return True
-
-                    try:
-                        file_count = await page.locator('[class*="fileName"]').count()
-                    except Exception:
-                        file_count = 0
-                    if file_count > 0:
-                        return True
-
-                    if last and len(last) >= 3 and last in body and any(x in body for x in positive_markers):
-                        return True
-
-                    # Generic order-detail markers are enough when the browser is
-                    # still on the exact requested order route. This catches
-                    # orders whose order number/name is not repeated in body text.
-                    if exact_route_seen and any(x in body for x in positive_markers):
-                        return True
-
-                    await page.wait_for_timeout(750)
-
-                # Final fallback: if authentication succeeded, the browser stayed
-                # on the exact requested order route for the whole probe, the page
-                # rendered substantive content, and there was no explicit negative
-                # state, treat it as the owning tenant rather than cycling through
-                # every other login.
-                if exact_route_seen and len(last_body) >= 120 and not any(x in last_body for x in negatives):
-                    return True
-                return False
-
-        async def discover_login_for_row(row: dict, oid: str, company: str, dealer: str) -> tuple[tuple[str, str] | None, str, str]:
-            """Try saved accounts automatically and remember the tenant that owns this company/order."""
-            entity_key = shedsuite_login_key(company, dealer) or f'order:{oid}'
-            if entity_key in discovery_cache:
-                email = discovery_cache[entity_key]
-                item = login_map.get(email.casefold())
+            v3_login = str(row.get('_login') or '').strip()
+            ordered: list[tuple[str, str]] = []
+            if v3_login:
+                item = login_map.get(v3_login.lower())
                 if item:
-                    return item, email, 'auto-discovered mapping'
+                    ordered.append(item)
+                return ordered
 
-            lock = discovery_locks.setdefault(entity_key, asyncio.Lock())
-            async with lock:
-                if entity_key in discovery_cache:
-                    email = discovery_cache[entity_key]
-                    item = login_map.get(email.casefold())
-                    if item:
-                        return item, email, 'auto-discovered mapping'
-
-                candidates = list(logins)
-                if not candidates:
-                    return None, '', 'no saved ShedSuite accounts'
-                if progress:
-                    progress(oid, 'working', f'New company: automatically checking {len(candidates)} saved ShedSuite account(s)…', row)
-
-                # Probe in bounded parallel batches. We reuse authenticated contexts,
-                # so later discoveries are usually much faster than the first one.
-                async def one(candidate):
-                    email, password = candidate
-                    try:
-                        ok = await probe_account_for_order(email, password, oid, row)
-                    except Exception:
-                        ok = False
-                    return candidate if ok else None
-
-                # Use the same global semaphore to avoid flooding ShedSuite.
-                async def guarded(candidate):
-                    async with semaphore:
-                        return await one(candidate)
-
-                results = await asyncio.gather(*(guarded(c) for c in candidates))
-                matches = [x for x in results if x]
-                if len(matches) == 1:
-                    email, password = matches[0]
-                    discovery_cache[entity_key] = email
-                    save_shedsuite_login_mapping(company, dealer, email)
-                    row['_login'] = email
-                    if progress:
-                        progress(oid, 'working', f'Automatically discovered ShedSuite login {email}. Downloading certificate…', row)
-                    return (email, password), email, 'auto-discovered mapping'
-                if len(matches) > 1:
-                    return None, '', 'multiple saved ShedSuite accounts appeared to contain this order; choose one manually'
-                return None, '', 'automatic login discovery could not find this order in the saved ShedSuite accounts'
+            preferred = _preferred_login(src.get('Company Name', ''), src.get('Dealer', ''))
+            for email in preferred:
+                item = login_map.get(email.lower())
+                if item and item not in ordered:
+                    ordered.append(item)
+            if not ordered:
+                ordered.extend(logins)
+            return ordered
 
         async def get_context(email: str, password: str):
             key = email.lower()
@@ -1138,82 +651,44 @@ async def _run(
             if should_process and not should_process(oid):
                 return
 
-            known_item, resolved_email, login_reason, company, dealer = login_resolution_for(row)
-            entity_key = shedsuite_login_key(company, dealer) or f'order:{oid}'
-
-            # V7.22 validates a known mapping once per company before trusting it.
-            # If an older built-in/saved mapping points to the wrong tenant, the
-            # app automatically falls back to account discovery instead of waiting
-            # on the wrong order page or making the user close Chromium manually.
-            if known_item is not None:
-                cached_email = validated_mapping_cache.get(entity_key, '')
-                if cached_email.casefold() != resolved_email.casefold():
-                    try:
-                        async with semaphore:
-                            owns_order = await probe_account_for_order(known_item[0], known_item[1], oid, row)
-                    except Exception:
-                        owns_order = False
-                    if owns_order:
-                        validated_mapping_cache[entity_key] = resolved_email
-                    else:
-                        if progress:
-                            progress(oid, 'working', f'Mapped login {resolved_email} did not match this order. Auto-discovering the correct ShedSuite account…', row)
-                        known_item, resolved_email, login_reason = await discover_login_for_row(row, oid, company, dealer)
-                        if known_item is not None:
-                            validated_mapping_cache[entity_key] = resolved_email
-
-            if known_item is None:
-                prior_resolved_email = resolved_email
-                discovered_item, discovered_email, discovered_reason = await discover_login_for_row(row, oid, company, dealer)
-                if discovered_item is not None:
-                    known_item, resolved_email, login_reason = discovered_item, discovered_email, discovered_reason
-                    validated_mapping_cache[entity_key] = resolved_email
-                elif not resolved_email:
-                    resolved_email = prior_resolved_email
-                    login_reason = discovered_reason or login_reason
-
-            if known_item is None:
-                row['_delivery_certificate'] = 'Login mapping needed'
+            ordered = ordered_logins_for(row)
+            v3_login = str(row.get('_login') or '').strip()
+            if v3_login and not ordered:
+                warnings.append(
+                    f"{row.get('NAME') or oid}: Delivery Certificate: "
+                    f"V3 selected ShedSuite login {v3_login}, but that login was not found in Logininfo."
+                )
+                row['_delivery_certificate'] = 'Missing'
                 row['_delivery_certificate_method'] = ''
-                if resolved_email:
-                    detail = f'ShedSuite login {resolved_email} is mapped to this company but is not present in the saved accounts.'
-                else:
-                    detail = login_reason or f'ShedSuite login mapping needed for {company or dealer or "this company"}.'
-                warnings.append(f"{row.get('NAME') or oid}: Delivery Certificate: {detail}")
                 if progress:
-                    progress(oid, 'login_needed', detail, row)
+                    progress(oid, 'missing', f'Login mapping not found for {v3_login}.', row)
                 return
 
             if progress:
-                progress(oid, 'working', f'Using ShedSuite login {resolved_email} ({login_reason}). Prefetching Delivery Certificate…', row)
+                progress(oid, 'working', 'Prefetching Delivery Certificate from ShedSuite…', row)
 
             cert_data = None
             method = ''
             cert_name = ''
             last_error = 'Delivery Certificate not found'
 
-            email, password = known_item
+            # Different company logins can proceed at the same time. Rows that
+            # share one login intentionally serialize on the same authenticated page.
             async with semaphore:
-                if should_process and not should_process(oid):
-                    return
-                key = email.lower()
-                lock = login_locks.setdefault(key, asyncio.Lock())
-                try:
-                    async with lock:
-                        context, page = await get_context(email, password)
-                        cert_data, method, cert_name = await _capture_delivery_certificate(page, context, oid)
-                    if not cert_data:
+                for email, password in ordered:
+                    if should_process and not should_process(oid):
+                        return
+                    key = email.lower()
+                    lock = login_locks.setdefault(key, asyncio.Lock())
+                    try:
+                        async with lock:
+                            context, page = await get_context(email, password)
+                            cert_data, method, cert_name = await _capture_delivery_certificate(page, context, oid)
+                        if cert_data:
+                            break
                         last_error = method
-                except Exception as exc:
-                    last_error = str(exc)
-
-            if cert_data and resolved_email:
-                src = src_by_order.get(oid, {})
-                save_shedsuite_login_mapping(
-                    str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip(),
-                    str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip(),
-                    resolved_email,
-                )
+                    except Exception as exc:
+                        last_error = str(exc)
 
             if not cert_data:
                 row['_delivery_certificate'] = 'Missing'

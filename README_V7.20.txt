@@ -1,21 +1,8 @@
-ShedSuite RTO Web App V7.21
+ShedSuite RTO Web App V7.20
 ===========================
 
 This is the single consolidated README / changelog for the project.
 New entries are added at the top. Older behavior remains unless a later entry says it was changed.
-
-
-V7.21 - Deterministic ShedSuite login mapping for new companies
------------------------------------------------------------------
-- Delivery Certificate retrieval no longer cycles through every Logininfo account when a company has no known ShedSuite login.
-- Existing built-in company login mappings continue to go directly to the known account.
-- New/unmapped companies are marked LOGIN NEEDED instead of opening unrelated ShedSuite tenants.
-- Review shows a one-time ShedSuite Login selector containing email addresses from the local Logininfo table (passwords are never sent to the browser).
-- Choosing Remember & Retry saves Company -> ShedSuite login locally and automatically retries the waiting contracts.
-- Saved mappings persist across jobs and future app versions at %LOCALAPPDATA%\ShedSuiteRTO\shedsuite_login_mappings.json by default.
-- Company-name normalization ignores common legal suffixes such as LLC, Inc., Company and Buildings, so minor naming variants reuse the same login.
-- A user-confirmed saved login mapping overrides an older built-in guess, allowing a wrong mapping to be corrected without changing Python code.
-- Successful certificate retrieval also reinforces/saves the resolved company login mapping.
 
 
 V7.20 - PDF EPO schedules

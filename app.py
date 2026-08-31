@@ -46,16 +46,7 @@ from rto_transform import (
     MODEL_SERIES,
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
-from delivery_certificate import (
-    append_delivery_certificates,
-    available_shedsuite_login_emails,
-    resolve_shedsuite_login,
-    save_shedsuite_login_mapping,
-    shedsuite_login_key,
-    list_shedsuite_accounts,
-    save_shedsuite_account,
-    delete_shedsuite_account,
-)
+from delivery_certificate import append_delivery_certificates
 from pdf_contract_import import parse_contract_pdf, pdf_epo_percentage
 from category_rules import APPROVED_CATEGORIES, canonical_category, smart_category, normalize_color_words
 
@@ -3342,102 +3333,6 @@ def index():
     )
 
 
-def _waiting_login_orders(job: str) -> set[str]:
-    """Find rows waiting on login discovery/mapping so account changes can retry them."""
-    try:
-        jp = job_path(job)
-    except Exception:
-        return set()
-    if not (jp / 'rows.json').exists():
-        return set()
-    try:
-        status = _read_certificate_status(jp)
-    except Exception:
-        status = {}
-    waiting = {
-        str(oid or '').strip()
-        for oid, item in (status.get('items', {}) or {}).items()
-        if str((item or {}).get('status', '') or '').strip().casefold() == 'login_needed'
-    }
-    if waiting:
-        return {x for x in waiting if x}
-    try:
-        rows = json.loads((jp / 'rows.json').read_text(encoding='utf-8'))
-    except Exception:
-        return set()
-    return {
-        str(r.get('_source_order_id', '') or '').strip()
-        for r in rows
-        if str(r.get('_source_type', 'csv') or 'csv').casefold() != 'pdf'
-        and str(r.get('_delivery_certificate', '') or '').strip().casefold() == 'login mapping needed'
-        and str(r.get('_source_order_id', '') or '').strip()
-    }
-
-
-@app.get('/shedsuite-accounts')
-def shedsuite_accounts_page():
-    job = str(request.args.get('job', '') or '').strip()
-    accounts = list_shedsuite_accounts(BASE, include_legacy=True)
-    return render_template(
-        'shedsuite_accounts.html',
-        accounts=accounts,
-        job=job,
-        store_path=(os.getenv('SHEDSUITE_ACCOUNTS_FILE', '').strip() or (
-            '%LOCALAPPDATA%\\ShedSuiteRTO\\shedsuite_accounts.json' if os.name == 'nt'
-            else '~/.shedsuite_rto/shedsuite_accounts.json'
-        )),
-        protected_on_windows=(os.name == 'nt'),
-    )
-
-
-@app.post('/shedsuite-accounts/save')
-def shedsuite_accounts_save():
-    email = str(request.form.get('email', '') or '').strip()
-    password = str(request.form.get('password', '') or '')
-    job = str(request.form.get('job', '') or '').strip()
-    if not email or '@' not in email:
-        flash('Enter a valid ShedSuite login email.', 'error')
-        return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
-    if not password:
-        flash('Enter the ShedSuite password. Existing passwords are never shown back in the browser.', 'error')
-        return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
-    save_error = ''
-    try:
-        ok = save_shedsuite_account(email, password)
-    except Exception as exc:
-        ok = False
-        save_error = str(exc)
-    if ok:
-        # Old cached auth could belong to a changed password. Remove only this
-        # account's state so the next worker authenticates with the new secret.
-        try:
-            shedsuite_auth_path(email).unlink(missing_ok=True)
-        except Exception:
-            pass
-        flash(f'Saved ShedSuite account {email}.', 'success')
-        if job:
-            waiting = _waiting_login_orders(job)
-            if waiting:
-                _start_certificate_worker_when_idle(job, waiting)
-    else:
-        flash('Could not save ShedSuite account' + (f': {save_error}' if save_error else '.'), 'error')
-    return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
-
-
-@app.post('/shedsuite-accounts/delete')
-def shedsuite_accounts_delete():
-    email = str(request.form.get('email', '') or '').strip()
-    job = str(request.form.get('job', '') or '').strip()
-    if delete_shedsuite_account(email):
-        try:
-            shedsuite_auth_path(email).unlink(missing_ok=True)
-        except Exception:
-            pass
-        flash(f'Removed ShedSuite account {email}.', 'success')
-    else:
-        flash('That account is from the legacy workbook or was not found in the in-app account store.', 'error')
-    return redirect(url_for('shedsuite_accounts_page', job=job) if job else url_for('shedsuite_accounts_page'))
-
 
 @app.post('/inventory/start')
 def inventory_start():
@@ -3982,55 +3877,6 @@ def process():
     )
 
 
-
-def _shedsuite_login_review_data(rows: list[dict], source_rows: list[dict]) -> tuple[list[str], list[dict]]:
-    """Return safe email choices plus new/invalid company mappings needing input."""
-    try:
-        emails = available_shedsuite_login_emails(BASE)
-    except Exception:
-        emails = []
-    email_set = {str(x or '').strip().casefold() for x in emails}
-    src_by_order = {str(x.get('Customer Order Id', '') or '').strip(): x for x in source_rows}
-    groups: dict[str, dict] = {}
-    for row in rows:
-        if str(row.get('_source_type', 'csv') or 'csv').casefold() == 'pdf':
-            continue
-        oid = str(row.get('_source_order_id', '') or '').strip()
-        if not oid:
-            continue
-        src = src_by_order.get(oid, {})
-        company = str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip()
-        dealer = str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip()
-        resolved, reason = resolve_shedsuite_login(company, dealer, str(row.get('_login', '') or '').strip())
-        if resolved and resolved.casefold() in email_set:
-            continue
-        key = shedsuite_login_key(company, dealer) or f'order:{oid}'
-        item = groups.setdefault(key, {
-            'key': key,
-            'company': company or '(company name missing)',
-            'dealer': dealer,
-            'orders': [],
-            'current_login': resolved,
-            'reason': reason,
-        })
-        item['orders'].append(oid)
-    return emails, list(groups.values())
-
-
-def _start_certificate_worker_when_idle(job: str, order_ids: set[str]) -> None:
-    """Retry newly mapped rows as soon as the current background batch releases."""
-    def runner():
-        deadline = time.time() + 600
-        while time.time() < deadline:
-            with CERT_ACTIVE_LOCK:
-                busy = job in CERT_ACTIVE
-            if not busy:
-                _start_certificate_worker(job, set(order_ids), prefetch=False)
-                return
-            time.sleep(0.5)
-    threading.Thread(target=runner, daemon=True, name=f'delivery-login-map-{job}').start()
-
-
 @app.get('/review/<job>')
 def review(job):
     jp, rows, refs, warnings = load_job(job)
@@ -4066,17 +3912,6 @@ def review(job):
         except Exception:
             input_summary = {}
 
-    shedsuite_login_options, shedsuite_login_needs = _shedsuite_login_review_data(rows, source_rows)
-
-    # V7.22: if accounts were just added while this job was waiting, a normal
-    # return to Review should automatically retry discovery without another click.
-    waiting_login_orders = _waiting_login_orders(job)
-    if waiting_login_orders and shedsuite_login_options:
-        with CERT_ACTIVE_LOCK:
-            busy = job in CERT_ACTIVE
-        if not busy:
-            _start_certificate_worker_when_idle(job, waiting_login_orders)
-
     page_html = render_template(
         'review.html',
         job=job,
@@ -4088,8 +3923,6 @@ def review(job):
         input_summary=input_summary,
         approved_categories=APPROVED_CATEGORIES,
         learning_stats=correction_learning_stats(),
-        shedsuite_login_options=shedsuite_login_options,
-        shedsuite_login_needs=shedsuite_login_needs,
     )
     return inject_review_panels(page_html, source_rows, rows, job, refs)
 
@@ -4396,87 +4229,16 @@ def api_delivery_status(job):
     with _job_lock(job):
         status = _read_certificate_status(jp)
     items = status.get('items', {}) if isinstance(status.get('items', {}), dict) else {}
-    counts = {'queued': 0, 'working': 0, 'prefetched': 0, 'ready': 0, 'missing': 0, 'login_needed': 0, 'skipped': 0, 'discarded': 0, 'not_requested': 0}
+    counts = {'queued': 0, 'working': 0, 'prefetched': 0, 'ready': 0, 'missing': 0, 'skipped': 0, 'discarded': 0, 'not_requested': 0}
     for item in items.values():
         key = str((item or {}).get('status', '')).lower()
         if key in counts:
             counts[key] += 1
     status['counts'] = counts
-    status['total'] = counts['queued'] + counts['working'] + counts['prefetched'] + counts['ready'] + counts['missing'] + counts['login_needed'] + counts['skipped']
+    status['total'] = counts['queued'] + counts['working'] + counts['prefetched'] + counts['ready'] + counts['missing'] + counts['skipped']
     status['done'] = counts['ready'] + counts['missing'] + counts['skipped']
     return jsonify(status)
 
-
-
-@app.post('/api/shedsuite-login-map/<job>')
-def api_shedsuite_login_map(job):
-    jp = job_path(job)
-    if not (jp / 'rows.json').exists():
-        abort(404)
-    payload = request.get_json(silent=True) or {}
-    company = str(payload.get('company', '') or '').strip()
-    dealer = str(payload.get('dealer', '') or '').strip()
-    email = str(payload.get('email', '') or '').strip()
-    requested_orders = {str(x or '').strip() for x in (payload.get('orders') or []) if str(x or '').strip()}
-
-    try:
-        available = available_shedsuite_login_emails(BASE)
-    except Exception as exc:
-        return jsonify({'ok': False, 'error': f'Could not read saved ShedSuite accounts: {exc}'}), 500
-    lookup = {x.casefold(): x for x in available}
-    if email.casefold() not in lookup:
-        return jsonify({'ok': False, 'error': 'Choose a ShedSuite login that exists in ShedSuite Accounts.'}), 400
-    email = lookup[email.casefold()]
-    if not save_shedsuite_login_mapping(company, dealer, email):
-        return jsonify({'ok': False, 'error': 'Could not save the company/login mapping.'}), 400
-
-    key = shedsuite_login_key(company, dealer)
-    affected: set[str] = set()
-    with _job_lock(job):
-        source_rows = json.loads((jp / 'source_rows.json').read_text(encoding='utf-8')) if (jp / 'source_rows.json').exists() else []
-        source_by_order = {str(x.get('Customer Order Id', '') or '').strip(): x for x in source_rows}
-        for filename in ('rows.json', 'certificate_rows.json'):
-            path = jp / filename
-            if not path.exists():
-                continue
-            rows = json.loads(path.read_text(encoding='utf-8'))
-            changed = False
-            for row in rows:
-                oid = str(row.get('_source_order_id', '') or '').strip()
-                if not oid or (requested_orders and oid not in requested_orders):
-                    continue
-                src = source_by_order.get(oid, {})
-                row_company = str(src.get('Company Name', '') or row.get('_source_company', '') or '').strip()
-                row_dealer = str(src.get('Dealer', '') or row.get('_source_dealer', '') or '').strip()
-                if key and shedsuite_login_key(row_company, row_dealer) != key:
-                    continue
-                row['_login'] = email
-                row['_delivery_certificate'] = 'Queued'
-                row['_delivery_certificate_method'] = ''
-                affected.add(oid)
-                changed = True
-            if changed:
-                temp = path.with_suffix('.tmp')
-                temp.write_text(json.dumps(rows, indent=2), encoding='utf-8')
-                temp.replace(path)
-
-        st = _read_certificate_status(jp)
-        st.setdefault('items', {})
-        for oid in affected:
-            name = str(st['items'].get(oid, {}).get('name', '') or oid)
-            st['items'][oid] = {
-                'status': 'queued',
-                'name': name,
-                'detail': f'ShedSuite login mapped to {email}. Queued for certificate retry…',
-            }
-        if affected:
-            st['active'] = True
-            st['complete'] = False
-        _write_certificate_status(jp, st)
-
-    if affected:
-        _start_certificate_worker_when_idle(job, affected)
-    return jsonify({'ok': True, 'email': email, 'orders': sorted(affected)})
 
 @app.post('/api/delivery-retry/<job>/<order_id>')
 def api_delivery_retry(job, order_id):
