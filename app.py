@@ -1560,13 +1560,16 @@ def inventory_profile_payload(ref: ReferenceData) -> list[dict]:
         latest = ''
         suggested = ''
         if profile in MODEL_SERIES:
-            prefix, lo, hi, _pad3 = MODEL_SERIES[profile]
+            prefix, lo, _hi, _pad3 = MODEL_SERIES[profile]
             vals = []
             for model in models:
                 if not model.startswith(prefix):
                     continue
                 tail = model[len(prefix):]
-                if tail.isdigit() and lo <= int(tail) <= hi:
+                # V7.20.4: don't exclude real inventory numbers that have grown
+                # past the workbook's original ceiling; see rto_transform.py
+                # build_next_model_suggestions for the matching fix.
+                if tail.isdigit() and int(tail) >= lo:
                     vals.append(int(tail))
             if vals:
                 latest = _format_series_model(profile, max(vals))

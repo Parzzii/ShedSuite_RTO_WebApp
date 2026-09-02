@@ -23,7 +23,6 @@ APPROVED_CATEGORIES = [
     'Metal Utility',
     'Mini Barn',
     'Highland',
-    'Side Utility',
     'Utility',
     'Gazebo',
     'Porch',

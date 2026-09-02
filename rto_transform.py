@@ -369,13 +369,19 @@ def company_rule(src: dict[str, str]) -> dict[str, str]:
 def build_next_model_suggestions(ref: ReferenceData) -> dict[str, str]:
     used = [clean_text(x.get('model')) for x in ref.existing_serials]
     result: dict[str, str] = {}
-    for profile, (prefix, lo, hi, pad3) in MODEL_SERIES.items():
+    for profile, (prefix, lo, _hi, pad3) in MODEL_SERIES.items():
         vals = []
         for m in used:
             if not m.startswith(prefix):
                 continue
             tail = m[len(prefix):]
-            if tail.isdigit() and lo <= int(tail) <= hi:
+            # V7.20.4: the range's upper bound is a seed/reference ceiling
+            # copied from the original workbook, not a hard cap on real
+            # inventory. Growth past that number (e.g. DBM Phoenix passing
+            # 598) must still count as "used", or the suggestion collapses
+            # back to already-issued numbers. Only the lower bound is
+            # enforced, to avoid picking up unrelated stray digits.
+            if tail.isdigit() and int(tail) >= lo:
                 vals.append(int(tail))
         # Workbook's formulas seed with the lower bound and then +1.
         n = max(vals + [lo]) + 1
