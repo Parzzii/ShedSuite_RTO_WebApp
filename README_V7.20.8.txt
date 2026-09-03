@@ -1,3 +1,19 @@
+ShedSuite RTO Web App - V7.20.8
+====================================
+
+V7.20.8 - Combined PDF filenames drop the order number
+------------------------------------------------------------
+- Combined PDF filenames are now just "LAST FIRST" (e.g. "SMITH JOHN.pdf")
+  instead of "LAST FIRST orderid" (e.g. "SMITH JOHN 10482.pdf").
+- Safety net: this filename is also the actual on-disk key the Delivery
+  Certificate, discard, and ZIP export pipeline uses to find each contract's
+  PDF (Combined_Files/<name>.pdf). If two customers in the same batch share
+  the exact same Last/First name, the second one is automatically named
+  "LAST FIRST (2)" so its PDF can't silently overwrite the first customer's.
+  This only happens on an actual name collision -- the normal case is
+  unaffected and stays exactly "LAST FIRST".
+- No other combined-PDF behavior changed.
+
 ShedSuite RTO Web App - V7.20.7
 ====================================
 

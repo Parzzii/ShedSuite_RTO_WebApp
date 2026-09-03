@@ -1071,7 +1071,7 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
             '_dealer_name': dealer_name_for_id(ref, dealer_id),
             '_account_suggestions': account_suggestions,
             '_warnings': row_warnings,
-            '_pdf_name': f'{last} {first} {order_id}'.strip(),
+            '_pdf_name': f'{last} {first}'.strip(),
             '_signed_url': clean_text(src.get('Signed Combined Documents')) or clean_text(src.get('Rto Contract')),
             '_contract_url': clean_text(src.get('Rto Contract')),
             '_invoice_url': clean_text(src.get('Invoice')),
@@ -1083,4 +1083,19 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
 
     if not ref.connected:
         warnings.insert(0, 'Firebird is not connected. Store defaults still work, but dealer/zone/tax/duplicate lookup data may be incomplete until the DSN connects.')
+
+    # V7.20.8: _pdf_name dropped its order-number suffix per user request, but
+    # this exact string is the real on-disk filename the certificate/discard/
+    # export pipeline uses to find each contract's combined PDF
+    # (Combined_Files/<name>.pdf). Two customers sharing the same Last/First
+    # within one batch would otherwise silently collide onto the same file.
+    # Only disambiguate when that actually happens, so the normal case stays
+    # exactly "Last First" as requested.
+    seen_pdf_names: dict[str, int] = {}
+    for r in out:
+        base = r.get('_pdf_name', '')
+        seen_pdf_names[base] = seen_pdf_names.get(base, 0) + 1
+        if seen_pdf_names[base] > 1:
+            r['_pdf_name'] = f'{base} ({seen_pdf_names[base]})'
+
     return out, list(dict.fromkeys(warnings))
