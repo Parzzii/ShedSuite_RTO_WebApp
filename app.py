@@ -709,8 +709,6 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
         serial = str(row.get('SERIAL1', '') or src.get('Serial Number', '') or '').strip()
 
         model = str(row.get('MODEL1', '') or '').strip()
-        condition = str(src.get('Condition', '') or row.get('_source_condition', '') or '').strip()
-        condition_low = condition.casefold()
 
         # Recover the model previously assigned to this exact physical serial
         # BEFORE deciding whether this row should consume a new model number.
@@ -726,12 +724,13 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
 
         history = serial_contract_history or used_model_history(model, ref.existing_contracts)
 
-        condition_detected = any(
-            token in condition_low
-            for token in ('used', 'pre-owned', 'preowned', 'repo', 'repossessed')
-        )
+        # V7.20.9: "Used Detected" should only fire on real RTO Pro evidence
+        # (an exact serial match, or contract history for that model) -- not
+        # merely because ShedSuite's Condition field or a PDF says "Used".
+        # The raw Condition value is still written to CONDITION1 and stays
+        # editable in the review UI; it just no longer auto-flags the row.
         serial_detected = bool(serial_model)
-        detected = bool(history or condition_detected or serial_detected)
+        detected = bool(history or serial_detected)
 
         reasons = []
         if serial_detected:
@@ -741,9 +740,6 @@ def apply_used_building_defaults(rows: list[dict], source_rows: list[dict], ref:
             reasons.append(detail)
         if history:
             reasons.append('RTO Pro contract history: ' + ', '.join(history[:4]))
-        if condition_detected:
-            source_label = 'PDF condition' if str(src.get('_import_source_type', '') or '').lower() == 'pdf' else 'ShedSuite condition'
-            reasons.append(source_label + ': ' + condition)
 
         # ShedSuite contracts intentionally use MODEL1 as their base number.
         # RentaBarn/Choice Capital PDF contracts keep Agreement # as CONTRACT,

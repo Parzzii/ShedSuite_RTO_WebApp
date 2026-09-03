@@ -1,3 +1,23 @@
+ShedSuite RTO Web App - V7.20.9
+====================================
+
+V7.20.9 - "Used Detected" now requires real RTO Pro evidence
+------------------------------------------------------------------
+- Previously, a contract was auto-flagged "Used Detected" (and the Used
+  Building checkbox auto-checked) if EITHER an exact serial/model match was
+  found in RTO Pro history, OR ShedSuite's Condition field/PDF condition text
+  simply said "Used", "Pre-Owned", "Repo", etc.
+- Per user request, the Condition-text trigger has been removed. "Used
+  Detected" now fires ONLY when the app finds real evidence in RTO Pro: an
+  exact serial number match in existing inventory, or contract history for
+  that model number.
+- The raw Condition value is unaffected: it's still written to RTO's
+  CONDITION1 field and stays visible/editable in the review page. It just no
+  longer forces the Used Building badge/checkbox on its own.
+- If a truly used building has no prior RTO Pro record yet (first time that
+  serial has ever entered the system), it will no longer auto-flag as Used --
+  check the box manually in that case, same as any other manual correction.
+
 ShedSuite RTO Web App - V7.20.8
 ====================================
 
