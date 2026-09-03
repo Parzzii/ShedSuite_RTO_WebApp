@@ -44,6 +44,7 @@ from rto_transform import (
     phone,
     build_next_model_suggestions,
     MODEL_SERIES,
+    MODEL_SERIES_SHARED_PREFIXES,
 )
 from pdf_tools import download_and_combine, extract_pdf_fields, safe_filename
 from delivery_certificate import append_delivery_certificates
@@ -504,6 +505,9 @@ MODEL_DB_RULES = {
     'crf_genesis':              {'prefix': '35',   'min': 216,  'max': 298},
     'crf_phoenix':              {'prefix': '0149', 'min': 114,  'max': 198},
     'crf_4_seasons':            {'prefix': '0150', 'min': 153,  'max': 198},
+    # V7.20.5: GA "Top Notch" program for 4 Seasons; first-ever contract is
+    # 0155-001, so min starts at 0.
+    'crf_top_notch':            {'prefix': '0155', 'min': 0,    'max': 999},
     'dbm_phoenix':              {'prefix': '0203', 'min': 549,  'max': 598},
     'wwp':                      {'prefix': '1101', 'min': 409,  'max': 498},
     'ras_yss':                  {'prefix': '0605', 'min': 37,   'max': 98},
@@ -514,6 +518,17 @@ MODEL_DB_RULES = {
     'magnolia_smart_shed_tn':   {'prefix': '0801', 'min': 401,  'max': 499},
 }
 
+# V7.20.7: same shared-prefix collision guard as MODEL_SERIES_SHARED_PREFIXES
+# in rto_transform.py, but keyed by MODEL_DB_RULES' plain (no-dash) prefixes.
+def _model_db_shared_prefixes() -> set[str]:
+    counts: dict[str, int] = {}
+    for rule in MODEL_DB_RULES.values():
+        counts[rule['prefix']] = counts.get(rule['prefix'], 0) + 1
+    return {p for p, n in counts.items() if n > 1}
+
+
+MODEL_DB_RULES_SHARED_PREFIXES = _model_db_shared_prefixes()
+
 DEFAULT_MODEL_SERIES = {
     'magnolia_smart_shed_ga': {'label': 'Magnolia / Smart Shed — GA', 'prefix': '0801', 'last_used': '', 'example': '0801-1223'},
     'magnolia_smart_shed_sc': {'label': 'Magnolia / Smart Shed — SC', 'prefix': '0801', 'last_used': '', 'example': '0801-283'},
@@ -523,6 +538,7 @@ DEFAULT_MODEL_SERIES = {
     'crf_alpine': {'label': 'CRF / Alpine', 'prefix': '33', 'last_used': '', 'example': '33-1322'},
     'crf_phoenix': {'label': 'CRF / Phoenix', 'prefix': '0149', 'last_used': '', 'example': '0149-119'},
     'crf_4_seasons': {'label': 'CRF / 4 Seasons', 'prefix': '0150', 'last_used': '', 'example': '0150-159'},
+    'crf_top_notch': {'label': 'CRF / Top Notch (4 Seasons — GA)', 'prefix': '0155', 'last_used': '', 'example': '0155-001'},
     'dbm_phoenix': {'label': 'DBM Phoenix', 'prefix': '0203', 'last_used': '0203-584', 'example': ''},
     'wwp': {'label': 'WWP', 'prefix': '1101', 'last_used': '1101-437', 'example': ''},
     'ras_yss': {'label': 'RAS YSS', 'prefix': '0605', 'last_used': '0605-049', 'example': ''},
@@ -555,6 +571,9 @@ INVENTORY_PROFILES = {
     'CRF_GENESIS': {'label': 'GENESIS', 'brand': 'GENESIS', 'store': '1', 'tracker': 'crf_genesis'},
     'CRF_PHOENIX': {'label': 'PHOENIX — Carefree', 'brand': 'PHOENIX', 'store': '1', 'tracker': 'crf_phoenix'},
     'CRF_4_SEASONS': {'label': '4 SEASONS', 'brand': '4 SEASONS', 'store': '1', 'tracker': 'crf_4_seasons'},
+    # V7.20.6: Top Notch is its own Brand/Vendor (not 4 Seasons) even though
+    # it shares the same manufacturer relationship/login as WV.
+    'CRF_4_SEASONS_GA': {'label': 'TOP NOTCH (4 Seasons — GA)', 'brand': 'TOP NOTCH', 'store': '1', 'tracker': 'crf_top_notch'},
     'DBM_PHOENIX': {'label': 'PHOENIX — Dutch Boy', 'brand': 'PHOENIX', 'store': '2', 'tracker': 'dbm_phoenix'},
     'WWP': {'label': 'WESTWOOD SHEDS', 'brand': 'WESTWOOD SHEDS', 'store': '11', 'tracker': 'wwp'},
     'RAS_YSS': {'label': 'YODER STORAGE', 'brand': 'YODER STORAGE', 'store': '6', 'tracker': 'ras_yss'},
@@ -1476,7 +1495,9 @@ def model_series_key(src):
     if 'phoenix' in combined and 'crf' in combined:
         return 'crf_phoenix'
     if '4 seasons' in combined or 'four seasons' in combined:
-        return 'crf_4_seasons'
+        # V7.20.5: GA orders are the "Top Notch" program; everything else
+        # (including blank/other states) stays on the original WV series.
+        return 'crf_top_notch' if state == 'GA' else 'crf_4_seasons'
 
     # Any future company still gets its own editable tracker card.
     return 'company_' + _slug(company or dealer)
@@ -1560,17 +1581,28 @@ def inventory_profile_payload(ref: ReferenceData) -> list[dict]:
         latest = ''
         suggested = ''
         if profile in MODEL_SERIES:
-            prefix, lo, _hi, _pad3 = MODEL_SERIES[profile]
+            prefix, lo, hi, _pad3 = MODEL_SERIES[profile]
+            shared = prefix in MODEL_SERIES_SHARED_PREFIXES
             vals = []
             for model in models:
                 if not model.startswith(prefix):
                     continue
                 tail = model[len(prefix):]
-                # V7.20.4: don't exclude real inventory numbers that have grown
-                # past the workbook's original ceiling; see rto_transform.py
-                # build_next_model_suggestions for the matching fix.
-                if tail.isdigit() and int(tail) >= lo:
-                    vals.append(int(tail))
+                # V7.20.7: a prefix shared by multiple series (e.g. Magnolia
+                # GA/SC/NC/TN all using "0801-") needs its upper bound
+                # enforced as a real partition boundary, or one state's
+                # lookup can pick up another's number, or stray/garbage data
+                # with the same prefix, as its "last used" value. A prefix
+                # unique to one series has no such collision risk, so its
+                # upper bound stays advisory only (see V7.20.4).
+                if not tail.isdigit():
+                    continue
+                n = int(tail)
+                if n < lo:
+                    continue
+                if shared and n > hi:
+                    continue
+                vals.append(n)
             if vals:
                 latest = _format_series_model(profile, max(vals))
             if ref.connected:
@@ -2000,6 +2032,7 @@ def refresh_model_tracker_from_contracts(contract_accounts: list[tuple[str, str]
 
         low = (rule or {}).get('min')
         high = (rule or {}).get('max')
+        shared = prefix in MODEL_DB_RULES_SHARED_PREFIXES
         best_contract = ''
         best_n = None
         pattern = re.compile(r'^' + re.escape(prefix) + r'-(\d+)$')
@@ -2011,7 +2044,14 @@ def refresh_model_tracker_from_contracts(contract_accounts: list[tuple[str, str]
             n = int(m.group(1))
             if low is not None and n < low:
                 continue
-            if high is not None and n > high:
+            # V7.20.7: restored the upper-bound check, but only for a prefix
+            # shared by more than one series (e.g. Magnolia GA/SC/NC/TN all
+            # using "0801"). For those it's a real partition boundary that
+            # keeps one state's tracker from picking up another's contract
+            # number, or an unrelated stray/garbage value with the same
+            # prefix. A prefix unique to one series (DBM Phoenix, etc.) has
+            # no such collision risk, so it stays uncapped (V7.20.4).
+            if shared and high is not None and n > high:
                 continue
             if best_n is None or n > best_n:
                 best_n = n

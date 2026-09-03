@@ -1,3 +1,78 @@
+ShedSuite RTO Web App - V7.20.7
+====================================
+
+V7.20.7 - Fixed Magnolia GA/SC/NC/TN picking up stray/out-of-range numbers
+------------------------------------------------------------------------------
+- Regression from V7.20.4: removing the upper-bound check entirely (to fix
+  DBM Phoenix getting stuck at its old ceiling) was too broad. Magnolia
+  GA/SC/NC/TN all share the same "0801-" prefix and are only told apart by
+  their number range, so their upper bound is a real partition boundary, not
+  a stale reference ceiling. With no upper bound at all, an unrelated stray
+  value like 0801-2040 in inventory got swept into GA's "used numbers" and
+  suggested as the next model, instead of the real last-used 0801-1244
+  correctly producing 0801-1245.
+- Fix: the upper bound is now enforced ONLY for a prefix shared by more than
+  one series (currently just Magnolia's four). A prefix unique to a single
+  series (DBM Phoenix, Alpine, Genesis, 4 Seasons, Top Notch, etc.) still has
+  no upper bound, so the V7.20.4 fix for real growth past an old ceiling is
+  unaffected for all of those.
+- Applied consistently across all three places that compute a "last used" or
+  "next" model number: build_next_model_suggestions() and normalized_brand()
+  callers (rto_transform.py), inventory_profile_payload() (app.py), and
+  refresh_model_tracker_from_contracts() (app.py).
+- New helpers MODEL_SERIES_SHARED_PREFIXES (rto_transform.py) and
+  MODEL_DB_RULES_SHARED_PREFIXES (app.py) compute which prefixes are shared,
+  so this stays correct automatically if a new series is ever added that
+  happens to reuse an existing prefix.
+
+ShedSuite RTO Web App - V7.20.6
+====================================
+
+V7.20.6 - Top Notch is its own Brand/Vendor
+-----------------------------------------------
+- Correction to V7.20.5: GA orders for "4 Seasons" now set BRAND1/VENDOR1 to
+  "TOP NOTCH" instead of "4 SEASONS". WV orders (and any other/blank state)
+  are unaffected and still use "4 SEASONS".
+- normalized_brand() now takes the order's state and checks it before the
+  general Brand/Vendor alias table, so this only affects 4 Seasons/Top Notch
+  and every other manufacturer's brand matching is untouched.
+- Applied the same brand correction to the Inventory workflow's profile entry
+  (INVENTORY_PROFILES['CRF_4_SEASONS_GA']) so Contracts and Inventory modes
+  agree on Brand/Vendor for Top Notch.
+- Zone (Top Notch, 0155), model series (0155-, starting at 0155-001), Store
+  (1 / Carefree), and ShedSuite login remain exactly as set up in V7.20.5.
+
+ShedSuite RTO Web App - V7.20.5
+====================================
+
+V7.20.5 - New GA "Top Notch" program for 4 Seasons
+-----------------------------------------------------
+- ShedSuite uses the same Company Name ("4 Seasons Buildings of WV LLC") for
+  both the original WV operation and a new GA operation, but the GA orders
+  actually belong to a separate RTO zone/dealer program called "Top Notch".
+- New state-aware routing: a Physical Destination State (or Company State /
+  Customer Mailing State) of GA now selects:
+    - Zone: "Top Notch, 0155" (was "4 Seasons, 0150" for WV)
+    - Model series: 0155- (brand new sequence, starts at 0155-001)
+  Store (1 / Carefree) and the ShedSuite login stay the same as WV. Any state
+  other than GA (including blank) keeps the original WV behavior unchanged.
+- Added the same routing to the Inventory workflow's company auto-detect
+  (model_series_key) and its Model Series tracker entries, so Inventory mode
+  offers "TOP NOTCH (4 Seasons - GA)" as its own trackable series.
+- Brand/Vendor for GA/Top Notch contracts is left as "4 SEASONS" (Top Notch is
+  treated as the zone/dealer program name, not a different manufacturer).
+  This can be changed to "TOP NOTCH" later if desired.
+- This state-override pattern (COMPANY_RULES 'state_overrides') is reusable:
+  future companies that split into multiple zones by state can be added the
+  same way without new code paths.
+- Also fixed: refresh_model_tracker_from_contracts() (app.py) had the same
+  hardcoded-ceiling bug fixed for model suggestions in V7.20.4, in a third,
+  separate code path (the live tracker refresh from RTO Pro contract
+  history). It was silently excluding any real contract number above each
+  series' old 'max' reference value, so the Model Series tracker panel could
+  stop reflecting reality once usage passed that ceiling. Only the floor
+  ('min') is enforced now, consistent with the V7.20.4 fix.
+
 ShedSuite RTO Web App - V7.20.4
 ====================================
 

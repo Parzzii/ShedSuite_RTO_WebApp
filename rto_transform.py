@@ -28,6 +28,12 @@ MODEL_SERIES = {
     'CRF_GENESIS': ('35-', 216, 298, False),
     'CRF_PHOENIX': ('0149-', 114, 198, False),
     'CRF_4_SEASONS': ('0150-', 153, 198, False),
+    # V7.20.5: GA orders for "4 Seasons" actually run through the separate
+    # "Top Notch" dealer/zone program (Store stays the same as WV, only the
+    # Zone and model sequence differ). This is the very first Top Notch
+    # contract series, so it starts fresh at 0155-001 (lo=0, pad3 so the
+    # leading zeros show).
+    'CRF_4_SEASONS_GA': ('0155-', 0, 999, True),
     'DBM_PHOENIX': ('0203-', 549, 598, False),
     'WWP': ('1101-', 409, 498, False),
     'RAS_YSS': ('0605-', 37, 98, True),
@@ -78,7 +84,15 @@ COMPANY_RULES = {
     },
     '4 seasons buildings of wv llc': {
         'profile': 'CRF_4_SEASONS', 'login': 'conrad.s+wv@evergreenrto.com', 'store_title': '1 Carefree', 'store': '1',
-        'zone_selector': '4 Seasons, 0150'
+        'zone_selector': '4 Seasons, 0150',
+        # V7.20.5: ShedSuite uses the same Company Name for both the WV and
+        # GA operations. GA orders route to the "Top Notch" zone/model series
+        # instead, even though Store and the ShedSuite login stay the same.
+        # Add more state codes here if 4 Seasons expands to other states with
+        # their own zone/model series later.
+        'state_overrides': {
+            'GA': {'profile': 'CRF_4_SEASONS_GA', 'zone_selector': 'Top Notch, 0155'},
+        },
     },
     # V7.20.1: White River / Crestwood onboarding. This is intentionally a
     # direct mapping so Delivery Certificate lookup uses the correct ShedSuite
@@ -363,26 +377,59 @@ def company_rule(src: dict[str, str]) -> dict[str, str]:
         st = clean_text(src.get('Physical Destination State')).upper()
         profile = f'MAG_{st}' if f'MAG_{st}' in MODEL_SERIES else 'MAG_GA'
         rule['profile'] = profile
+    # V7.20.5: some companies (e.g. 4 Seasons) use the SAME ShedSuite Company
+    # Name for two different states, but each state actually maps to its own
+    # RTO zone/model series. Unlike profile_by_state above, this can override
+    # profile AND zone_selector (and, if ever needed, store/login) together.
+    overrides = rule.get('state_overrides')
+    if overrides:
+        st = clean_text(
+            src.get('Physical Destination State')
+            or src.get('Company State')
+            or src.get('Customer Mailing State')
+        ).upper()
+        override = overrides.get(st)
+        if override:
+            rule.update(override)
     return rule
+
+
+# V7.20.7: some manufacturers share the same numeric prefix and are only told
+# apart by their number range (e.g. Magnolia GA/SC/NC/TN all use "0801-").
+# For those, the upper bound is a real partition boundary -- not just a stale
+# reference ceiling -- so it must stay enforced, or a GA lookup can pick up an
+# SC/NC/TN number, or unrelated stray/garbage data with the same prefix, as
+# its "last used" value. Series with a prefix unique to them (DBM Phoenix,
+# Alpine, etc.) have no such collision risk, so their upper bound is safe to
+# treat as advisory only (see V7.20.4).
+def _shared_prefixes(series: dict) -> set[str]:
+    counts: dict[str, int] = {}
+    for prefix, _lo, _hi, _pad3 in series.values():
+        counts[prefix] = counts.get(prefix, 0) + 1
+    return {p for p, n in counts.items() if n > 1}
+
+
+MODEL_SERIES_SHARED_PREFIXES = _shared_prefixes(MODEL_SERIES)
 
 
 def build_next_model_suggestions(ref: ReferenceData) -> dict[str, str]:
     used = [clean_text(x.get('model')) for x in ref.existing_serials]
     result: dict[str, str] = {}
-    for profile, (prefix, lo, _hi, pad3) in MODEL_SERIES.items():
+    for profile, (prefix, lo, hi, pad3) in MODEL_SERIES.items():
+        shared = prefix in MODEL_SERIES_SHARED_PREFIXES
         vals = []
         for m in used:
             if not m.startswith(prefix):
                 continue
             tail = m[len(prefix):]
-            # V7.20.4: the range's upper bound is a seed/reference ceiling
-            # copied from the original workbook, not a hard cap on real
-            # inventory. Growth past that number (e.g. DBM Phoenix passing
-            # 598) must still count as "used", or the suggestion collapses
-            # back to already-issued numbers. Only the lower bound is
-            # enforced, to avoid picking up unrelated stray digits.
-            if tail.isdigit() and int(tail) >= lo:
-                vals.append(int(tail))
+            if not tail.isdigit():
+                continue
+            n = int(tail)
+            if n < lo:
+                continue
+            if shared and n > hi:
+                continue
+            vals.append(n)
         # Workbook's formulas seed with the lower bound and then +1.
         n = max(vals + [lo]) + 1
         result[profile] = prefix + (f'{n:03d}' if pad3 else str(n))
@@ -775,7 +822,7 @@ BRAND_ALIASES = (
 )
 
 
-def normalized_brand(company: Any) -> str:
+def normalized_brand(company: Any, state: Any = '') -> str:
     c = clean_text(company)
     if not c:
         return ''
@@ -787,6 +834,13 @@ def normalized_brand(company: Any) -> str:
 
     # Common word-number spelling for 4 Seasons.
     compact = compact.replace('four', '4')
+
+    # V7.20.6: ShedSuite uses the same Company Name for 4 Seasons' WV and GA
+    # operations, but GA orders are their own "Top Notch" Brand/Vendor, not
+    # 4 SEASONS. Check this before the general alias table below.
+    if any(alias in compact for alias in ('4seasons', 'fourseasons', '4season', 'fourseason')):
+        if clean_text(state).upper() == 'GA':
+            return 'TOP NOTCH'
 
     for canonical, aliases in BRAND_ALIASES:
         if any(alias in compact for alias in aliases):
@@ -881,7 +935,7 @@ def transform_rows(rows: list[dict[str, str]], categories: dict[str, str], ref: 
         sec = parse_money(src.get('Security Deposit'))
         reserve = parse_money(src.get('Purchase Reserve'))
         amount_paid = initial - delivery_fee - sec - reserve
-        brand = normalized_brand(src.get('Company Name'))
+        brand = normalized_brand(src.get('Company Name'), state)
 
         r: dict[str, str] = {h: '' for h in RTO_HEADERS}
         r.update({
